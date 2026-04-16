@@ -1,0 +1,26 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Keystore
+*.jks
+*.keystore
+
+# Model assets (too large for git)
+app/src/main/assets/*.tflite
+app/src/main/assets/*.bin
+app/src/main/assets/*.so
+
+# OS
+.DS_Store
