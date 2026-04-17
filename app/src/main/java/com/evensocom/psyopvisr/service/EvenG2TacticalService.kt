@@ -1,29 +1,22 @@
 package com.evensocom.psyopvisr.service
 
 import android.app.*
-import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.util.Size
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
-import com.evensocom.psyopvisr.db.CulturalContextEngine
-import com.evensocom.psyopvisr.inference.TacticalInferenceEngine
 import com.evensocom.psyopvisr.sensors.CompassEngine
 import com.evensocom.psyopvisr.vision.TouchpadRouter
+import com.evensocom.psyopvisr.vision.VisualizationBus
 import com.evensocom.psyopvisr.vision.VisionModeController
 import com.evensocom.psyopvisr.vision.VoiceCommandEngine
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -50,7 +43,7 @@ class EvenG2TacticalService : LifecycleService() {
         )
     }
 
-    private lateinit var bleManager: EvenG2NativeBleManager
+    lateinit var bleManager: EvenG2NativeBleManager
     private lateinit var compassEngine: CompassEngine
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     val audioBufferChannel = Channel<ByteArray>(Channel.UNLIMITED)
@@ -58,6 +51,9 @@ class EvenG2TacticalService : LifecycleService() {
     private var currentHeading = ""
     private var currentBattery = "--%"
     private var lastVisualAlert = ""
+    // Last content pushed by VisionModeController — used by compass/battery refresh so
+    // they never overwrite the current menu/scan/idle text with a different layout.
+    @Volatile private var lastHudContentLines = "[TAP] Scan Menu"
 
     private var isHubInitialized = false
     private var containerCreated = false
@@ -65,14 +61,13 @@ class EvenG2TacticalService : LifecycleService() {
     // Cancellable jobs for loops that must not be duplicated across re-assertions
     private var heartbeatJob: kotlinx.coroutines.Job? = null
     private var batteryJob: kotlinx.coroutines.Job? = null
-    
-    // Inference Engine
-    private lateinit var inferenceEngine: TacticalInferenceEngine
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
 
-    // Vision system
+    // Vision system (camera + inference engine are owned by MainActivity)
     private lateinit var visionController: VisionModeController
     private lateinit var voiceEngine: VoiceCommandEngine
+
+    // BLE connection state exposed for MainActivity's UI
+    val connectionStateFlow get() = if (::bleManager.isInitialized) bleManager.connectionState else null
 
     // Magic counter: cycle 100..255 (firmware uses only low byte)
     @Volatile private var magic = 100
@@ -113,41 +108,13 @@ class EvenG2TacticalService : LifecycleService() {
 
         initializeBridge()
         initializeSensors()
-        initializeVision()
 
-        // Initialize vision mode controller and voice engine after vision is set up
-        visionController = VisionModeController.initialize(scope)
+        // VisionModeController: reuse existing instance if MainActivity already initialized it;
+        // otherwise initialize here so the service works standalone (e.g. after process restart).
+        visionController = VisionModeController.instance
+            ?: VisionModeController.initialize(scope)
         voiceEngine = VoiceCommandEngine(this)
         voiceEngine.startListening()
-    }
-
-    private fun initializeVision() {
-        val culturalDb = CulturalContextEngine(this)
-        scope.launch { culturalDb.seedIfNeeded() }
-        inferenceEngine = TacticalInferenceEngine(this, culturalDb)
-
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-            
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(640, 480))
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also {
-                    it.setAnalyzer(analysisExecutor, inferenceEngine)
-                }
-
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
-                Log.i(TAG, "CameraX bound to lifecycle.")
-            } catch (e: Exception) {
-                Log.e(TAG, "CameraX binding failed", e)
-            }
-        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun initializeSensors() {
@@ -155,37 +122,36 @@ class EvenG2TacticalService : LifecycleService() {
         compassEngine.start()
         
         scope.launch {
-            var lastHudUpdateMs = 0L
+            var lastCompassHudMs = 0L
             compassEngine.heading.collect {
                 currentHeading = compassEngine.getHeadingString()
-                // Rate-limit HUD redraws to once every 2 seconds — compass fires on every 2° change
+                // Refresh HUD at most every 5s — uses lastHudContentLines so the current
+                // menu/scan/idle text is preserved; heading is injected at render time.
                 val now = System.currentTimeMillis()
-                if (now - lastHudUpdateMs >= 2_000) {
-                    lastHudUpdateMs = now
-                    updateHudDisplay(null, null)
+                if (now - lastCompassHudMs >= 5_000) {
+                    lastCompassHudMs = now
+                    pushHudContent(lastHudContentLines)
                 }
             }
         }
     }
 
     private fun initializeBridge() {
-        // Kill the Even Realities companion app so it cannot steal back the HUD session.
-        try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            am.killBackgroundProcesses("com.even.sg")
-            Log.i(TAG, "Killed com.even.sg background processes")
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not kill com.even.sg: $e")
-        }
-
         bleManager = EvenG2NativeBleManager(this)
 
         scope.launch {
-            Log.i(TAG, "Connecting to EVEN G2 right arm...")
-            bleManager.connectToRightArm()
+            // Retry loop: reconnect after failure or disconnect with 8-second back-off.
+            // Status 0x93 (147) = G2 BLE stack rejected us — a brief pause clears it.
+            while (isActive) {
+                Log.i(TAG, "Connecting to EVEN G2 right arm...")
+                bleManager.connectToRightArm()
 
-            bleManager.connectionState.collect { connected ->
-                if (connected && !isHubInitialized) {
+                // Wait up to 35s for the connection to succeed.
+                val connected = withTimeoutOrNull(35_000) {
+                    bleManager.connectionState.first { it }
+                }
+
+                if (connected == true && !isHubInitialized) {
                     Log.i(TAG, "BLE connected. Running session prelude...")
                     try {
                         runSessionPrelude()
@@ -193,7 +159,17 @@ class EvenG2TacticalService : LifecycleService() {
                     } catch (e: Exception) {
                         Log.e(TAG, "Session prelude failed", e)
                     }
+
+                    // Wait for disconnect before retrying
+                    bleManager.connectionState.first { !it }
+                    isHubInitialized = false
+                    containerCreated = false
+                    Log.w(TAG, "BLE disconnected — retrying in 8s")
+                } else {
+                    Log.w(TAG, "BLE connection attempt failed/timed out — retrying in 8s")
                 }
+
+                delay(8_000)
             }
         }
     }
@@ -219,6 +195,13 @@ class EvenG2TacticalService : LifecycleService() {
                         0xe0 -> {
                             val hexDump = payload.joinToString(" ") { "%02x".format(it) }
                             Log.i(TAG, "EvenHub sid=0xe0 flag=0x${flag.toString(16)} pb[${payload.size}B]: $hexDump")
+                            val evenHubCmd = if (payload.size >= 2 && payload[0] == 0x08.toByte()) {
+                                payload[1].toInt() and 0xFF
+                            } else -1
+                            if (evenHubCmd == 16) {
+                                val audioStat = parseAudioCtrStatus(payload)
+                                Log.i(TAG, "AudioCtrRes received: AudioStat=$audioStat")
+                            }
                             val gesture = TouchpadRouter.parseEvenHubEvent(payload)
                             Log.i(TAG, "EvenHub event → $gesture")
                             if (gesture != null) {
@@ -252,9 +235,10 @@ class EvenG2TacticalService : LifecycleService() {
                             val cmdVal = if (payload.size >= 2 && payload[0] == 0x08.toByte())
                                 payload[1].toInt() and 0xFF else -1
                             if (cmdVal == 3) {
-                                // Cmd=3 means another app grabbed the session — re-assert ours
-                                Log.w(TAG, "Session stolen (AppConnect Cmd=3 from G2) — re-asserting prelude")
-                                reassertSession()
+                                // Cmd=3 means another app grabbed the session. Relinquish cleanly so
+                                // the official Even app can own translation/HUD without us fighting it.
+                                Log.i(TAG, "Session ownership transferred to companion app (Cmd=3)")
+                                relinquishSessionOwnership("Companion app took session")
                             }
                         }
 
@@ -285,10 +269,6 @@ class EvenG2TacticalService : LifecycleService() {
                 // Cancel existing loops so re-assertion doesn't spawn duplicates
                 heartbeatJob?.cancel()
                 batteryJob?.cancel()
-                try {
-                    (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
-                        .killBackgroundProcesses("com.even.sg")
-                } catch (_: Exception) {}
                 delay(200)
                 runSessionPrelude()
             } catch (e: Exception) {
@@ -374,7 +354,7 @@ class EvenG2TacticalService : LifecycleService() {
                     }
                     currentBattery = "$v%"
                     Log.i(TAG, "Battery updated: $v%")
-                    updateHudDisplay(null, null)
+                    pushHudContent(lastHudContentLines)  // refresh with new battery, keep current content
                     return
                 }
                 wireType == 0 -> { while (i < pb.size && (pb[i].toInt() and 0x80) != 0) i++; if (i < pb.size) i++ }
@@ -432,9 +412,30 @@ class EvenG2TacticalService : LifecycleService() {
      * the mic-enable command (sid=0x01, payload=0x0F).
      */
     private fun startAudioCapture() {
+        sendAudioControl(enable = true)
         // Tell the glasses to start streaming mic audio on the 6402 channel
         bleManager.enableMicrophone()
+        // Fallback handshake: some firmware expects mic-enable on the audio write char (6401).
+        bleManager.enableMicrophoneViaAudioChannel()
         Log.i(TAG, "Audio capture started — mic enable sent, bridging 6402 → audioBufferChannel")
+
+        scope.launch {
+            repeat(6) { attempt ->
+                delay(2_000)
+                val lastAudio = bleManager.getLastAudioDataMs()
+                val hasRecentAudio = lastAudio > 0 && (System.currentTimeMillis() - lastAudio) < 3_000
+                if (hasRecentAudio) {
+                    Log.i(TAG, "G2 mic stream active on attempt ${attempt + 1}")
+                    return@launch
+                }
+                Log.w(TAG, "No G2 mic frames yet; retrying mic-enable handshake (attempt ${attempt + 1})")
+                sendAudioControl(enable = true)
+                bleManager.enableMicrophone()
+                bleManager.enableMicrophoneViaAudioChannel()
+            }
+            Log.e(TAG, "G2 mic stream did not start (no 6402 notifications)")
+            pushHudContent("TRANSLATION\nG2 mic stream failed.\nReconnect glasses, then retry.")
+        }
 
         scope.launch {
             bleManager.audioNotifyFlow.collect { audioFrame ->
@@ -470,12 +471,6 @@ class EvenG2TacticalService : LifecycleService() {
             while (isActive && isHubInitialized) {
                 delay(5000)
                 try {
-                    // Periodically suppress the Even companion app so it can't steal the session
-                    try {
-                        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                        am.killBackgroundProcesses("com.even.sg")
-                    } catch (_: Exception) {}
-
                     val m = nextMagic()
                     val pb = buildHeartbeat()
                     bleManager.sendEnvelope(0xE0.toByte(), m, pb)
@@ -539,9 +534,11 @@ class EvenG2TacticalService : LifecycleService() {
      */
     fun pushHudContent(contentLines: String) {
         if (!isHubInitialized || !containerCreated) return
+        lastHudContentLines = contentLines   // remember for compass/battery refreshes
         val statusLine = "HDG: $currentHeading   BAT: $currentBattery"
         val full = "$statusLine\n────────────────────────\n$contentLines"
         val truncated = if (full.length > 900) full.substring(0, 900) else full
+        VisualizationBus.postHud(truncated)
         scope.launch {
             try {
                 val pb = buildRebuildText(CONTAINER_NAME, truncated)
@@ -713,6 +710,106 @@ class EvenG2TacticalService : LifecycleService() {
     }
 
     /**
+     * Cmd=15 APP_REQUEST_AUDIO_CTR_PACKET.
+     *
+     * evenhub_main_msg_ctx {
+     *   Cmd: 15                            // field 1
+     *   MagicRandom: <magic>               // field 2
+     *   AudioCtrCommand: {                 // field 18
+     *     AudoFuncEn: 1|0                  // field 1 (1=start, 0=stop)
+     *   }
+     * }
+     */
+    private fun buildAudioControlCmd(enable: Boolean, magic: Int): ByteArray {
+        val cmd = pbVarint(1, 15)
+        val magicField = pbVarint(2, magic)
+        val audioInner = pbVarint(1, if (enable) 1 else 0)
+        val audioField = pbBytes(18, audioInner)
+        return cmd + magicField + audioField
+    }
+
+    private fun sendAudioControl(enable: Boolean) {
+        try {
+            val m = nextMagic()
+            val pb = buildAudioControlCmd(enable, m)
+            bleManager.sendEnvelope(0xE0.toByte(), m, pb)
+            Log.i(TAG, "AudioCtrCmd sent (enable=$enable, magic=$m)")
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioCtrCmd send failed: $e")
+        }
+    }
+
+    /**
+     * Parse EvenHub AudioResCommand (field 19) and return AudioStat (field 1) if present.
+     */
+    private fun parseAudioCtrStatus(pb: ByteArray): Int? {
+        var i = 0
+        while (i < pb.size) {
+            val tag = pb[i].toInt() and 0xFF
+            val fieldNum = tag ushr 3
+            val wireType = tag and 0x07
+            i++
+            when {
+                fieldNum == 19 && wireType == 2 -> {
+                    var len = 0; var shift = 0
+                    while (i < pb.size) {
+                        val b = pb[i].toInt() and 0xFF; i++
+                        len = len or ((b and 0x7F) shl shift); shift += 7
+                        if ((b and 0x80) == 0) break
+                    }
+                    val end = minOf(i + len, pb.size)
+                    var j = i
+                    while (j < end) {
+                        val ctag = pb[j].toInt() and 0xFF
+                        val cField = ctag ushr 3
+                        val cWire = ctag and 0x07
+                        j++
+                        if (cField == 1 && cWire == 0) {
+                            var v = 0; var s = 0
+                            while (j < end) {
+                                val b = pb[j].toInt() and 0xFF; j++
+                                v = v or ((b and 0x7F) shl s); s += 7
+                                if ((b and 0x80) == 0) break
+                            }
+                            return v
+                        }
+                        if (cWire == 0) {
+                            while (j < end && (pb[j].toInt() and 0x80) != 0) j++
+                            if (j < end) j++
+                        } else if (cWire == 2) {
+                            var l = 0; var sh = 0
+                            while (j < end) {
+                                val b = pb[j].toInt() and 0xFF; j++
+                                l = l or ((b and 0x7F) shl sh); sh += 7
+                                if ((b and 0x80) == 0) break
+                            }
+                            j += l
+                        } else {
+                            j++
+                        }
+                    }
+                    i = end
+                }
+                wireType == 0 -> {
+                    while (i < pb.size && (pb[i].toInt() and 0x80) != 0) i++
+                    if (i < pb.size) i++
+                }
+                wireType == 2 -> {
+                    var len = 0; var shift = 0
+                    while (i < pb.size) {
+                        val b = pb[i].toInt() and 0xFF; i++
+                        len = len or ((b and 0x7F) shl shift); shift += 7
+                        if ((b and 0x80) == 0) break
+                    }
+                    i += len
+                }
+                else -> i++
+            }
+        }
+        return null
+    }
+
+    /**
      * sid=0x09 G2SettingPackage query for battery/status.
      *
      * G2SettingPackage {
@@ -732,6 +829,35 @@ class EvenG2TacticalService : LifecycleService() {
         return cmdId + magicField + reqField
     }
 
+    private fun relinquishSessionOwnership(reason: String) {
+        Log.i(TAG, "Relinquishing session ownership: $reason")
+        isHubInitialized = false
+        containerCreated = false
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        batteryJob?.cancel()
+        batteryJob = null
+    }
+
+    /**
+     * Called from MainActivity when user wants to switch back to the official Even app.
+     */
+    fun relinquishToCompanionAndStop() {
+        scope.launch {
+            relinquishSessionOwnership("User requested handoff to Even app")
+            if (::bleManager.isInitialized) {
+                bleManager.disconnect()
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+        }
+    }
+
     // ──────────────────── Lifecycle ────────────────────
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -747,16 +873,10 @@ class EvenG2TacticalService : LifecycleService() {
         instance = null
         isHubInitialized = false
         containerCreated = false
-        VisionModeController.instance?.let { /* instance will be GC'd with scope */ }
         if (::voiceEngine.isInitialized) voiceEngine.stopListening()
         scope.cancel()
-        if (::bleManager.isInitialized) {
-            bleManager.disconnect()
-        }
-        if (::compassEngine.isInitialized) {
-            compassEngine.stop()
-        }
-        analysisExecutor.shutdown()
+        if (::bleManager.isInitialized) bleManager.disconnect()
+        if (::compassEngine.isInitialized) compassEngine.stop()
         super.onDestroy()
         Log.i(TAG, "Service destroyed")
     }

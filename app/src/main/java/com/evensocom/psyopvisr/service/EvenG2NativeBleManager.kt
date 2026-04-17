@@ -56,8 +56,13 @@ class EvenG2NativeBleManager(private val context: Context) {
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
     private var bluetoothGatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
+    private var audioWriteChar: BluetoothGattCharacteristic? = null
+    private var leftAudioGatt: BluetoothGatt? = null
+    private var leftAudioNotifyChar: BluetoothGattCharacteristic? = null
     private var negotiatedMtu = 23 // default; updated in onMtuChanged
     private var useWriteWithResponse = false
+    @Volatile private var lastAudioNotifyMs: Long = 0L
+    @Volatile private var lastAudioDataMs: Long = 0L
 
     // Serialized write queue (mirrors droidbridge pattern)
     private val writeLock = Any()
@@ -85,6 +90,11 @@ class EvenG2NativeBleManager(private val context: Context) {
 
     // ──────────────────── Connection ────────────────────
 
+    // Track how many times we've failed so we know when to switch to autoConnect=true
+    private var directConnectFailCount = 0
+    private var connectTarget: BluetoothDevice? = null
+    private var leftAudioTarget: BluetoothDevice? = null
+
     fun connectToRightArm() {
         val paired = bluetoothAdapter?.bondedDevices
         Log.i(TAG, "Scanning ${paired?.size ?: 0} bonded devices...")
@@ -103,8 +113,53 @@ class EvenG2NativeBleManager(private val context: Context) {
             return
         }
 
-        Log.i(TAG, "Connecting → ${target.name} [${target.address}]")
-        bluetoothGatt = target.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        connectTarget = target
+        leftAudioTarget = paired?.firstOrNull {
+            it.name?.contains("G2", ignoreCase = true) == true &&
+                it.name?.contains("_L_", ignoreCase = true) == true
+        }
+
+        // After 2 failed direct-connect attempts, switch to autoConnect=true
+        // autoConnect=true waits for the device to advertise — more reliable when G2 is idle
+        val useAutoConnect = directConnectFailCount >= 2
+        if (useAutoConnect) {
+            Log.i(TAG, "Switching to autoConnect=true after $directConnectFailCount failures")
+        }
+
+        Log.i(TAG, "Connecting → ${target.name} [${target.address}] autoConnect=$useAutoConnect")
+
+        // Refresh GATT cache via reflection to clear stale service data (fixes status 147)
+        try {
+            bluetoothGatt?.let { old ->
+                old.javaClass.getMethod("refresh").invoke(old)
+                old.close()
+            }
+        } catch (_: Exception) {}
+        bluetoothGatt = null
+
+        bluetoothGatt = target.connectGatt(
+            context,
+            useAutoConnect,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE
+        )
+
+        val left = leftAudioTarget
+        if (left != null) {
+            try {
+                leftAudioGatt?.close()
+            } catch (_: Exception) {}
+            leftAudioGatt = null
+            Log.i(TAG, "Connecting LEFT arm audio channel → ${left.name} [${left.address}]")
+            leftAudioGatt = left.connectGatt(
+                context,
+                useAutoConnect,
+                leftAudioGattCallback,
+                BluetoothDevice.TRANSPORT_LE
+            )
+        } else {
+            Log.w(TAG, "No LEFT arm found — mic audio may be unavailable")
+        }
     }
 
     // ──────────────────── GATT callbacks ────────────────────
@@ -115,14 +170,28 @@ class EvenG2NativeBleManager(private val context: Context) {
             Log.i(TAG, "onConnectionStateChange: addr=$addr status=$status state=$newState")
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "Connected. Requesting MTU 244...")
+                    directConnectFailCount = 0   // reset on success
+                    Log.i(TAG, "Connected. Refreshing GATT cache then requesting MTU 244...")
+                    // Refresh GATT cache so service discovery always gets fresh results
+                    try { gatt.javaClass.getMethod("refresh").invoke(gatt) } catch (_: Exception) {}
                     gatt.requestMtu(244)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "Disconnected from $addr")
+                    if (status != BluetoothGatt.GATT_SUCCESS && status != 0) {
+                        directConnectFailCount++
+                        Log.w(TAG, "Disconnected from $addr (status=$status failCount=$directConnectFailCount)")
+                    } else {
+                        Log.w(TAG, "Disconnected from $addr")
+                    }
                     writeChar = null
                     writeLatch?.countDown() // unblock any pending write
                     gatt.close()
+                    try {
+                        leftAudioGatt?.disconnect()
+                        leftAudioGatt?.close()
+                    } catch (_: Exception) {}
+                    leftAudioGatt = null
+                    leftAudioNotifyChar = null
                     _connectionState.tryEmit(false)
                 }
             }
@@ -179,6 +248,7 @@ class EvenG2NativeBleManager(private val context: Context) {
             // Queue CCCD for 6402 (audio/render notify) if present
             val audioService = gatt.getService(UUID_SERVICE_AUDIO)
             if (audioService != null) {
+                audioWriteChar = audioService.getCharacteristic(UUID.fromString("00002760-08c2-11e1-9073-0e8ac72e6401"))
                 val audioNotifyChar = audioService.getCharacteristic(UUID_CHAR_NOTIFY_AUDIO)
                 if (audioNotifyChar != null) {
                     gatt.setCharacteristicNotification(audioNotifyChar, true)
@@ -249,7 +319,13 @@ class EvenG2NativeBleManager(private val context: Context) {
             val suffix = if (data.size > 16) "..." else ""
             Log.d(TAG, "NOTIFY ← ${data.size}B char=$charUuid hex=$hex$suffix")
             if (charUuid == UUID_CHAR_NOTIFY_AUDIO) {
-                _audioNotifyFlow.tryEmit(data)
+                lastAudioNotifyMs = System.currentTimeMillis()
+                if (data.size > 8) {
+                    lastAudioDataMs = lastAudioNotifyMs
+                    _audioNotifyFlow.tryEmit(data)
+                } else {
+                    Log.d(TAG, "Audio-channel control packet (${data.size}B) ignored")
+                }
             } else {
                 _notifyFlow.tryEmit(data)
             }
@@ -276,15 +352,94 @@ class EvenG2NativeBleManager(private val context: Context) {
         }
     }
 
+    private val leftAudioGattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val addr = gatt.device.address
+            Log.i(TAG, "LEFT onConnectionStateChange: addr=$addr status=$status state=$newState")
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    gatt.requestMtu(244)
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.w(TAG, "LEFT arm audio disconnected: status=$status")
+                    if (leftAudioGatt === gatt) {
+                        leftAudioNotifyChar = null
+                    }
+                    try { gatt.close() } catch (_: Exception) {}
+                }
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.i(TAG, "LEFT arm MTU negotiated: $mtu")
+            gatt.discoverServices()
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "LEFT arm service discovery failed: $status")
+                return
+            }
+            val audioService = gatt.getService(UUID_SERVICE_AUDIO)
+            val notifyChar = audioService?.getCharacteristic(UUID_CHAR_NOTIFY_AUDIO)
+            if (notifyChar == null) {
+                Log.w(TAG, "LEFT arm missing 6402 notify char")
+                return
+            }
+            leftAudioNotifyChar = notifyChar
+            gatt.setCharacteristicNotification(notifyChar, true)
+            val cccd = notifyChar.getDescriptor(UUID_CCCD)
+            if (cccd != null) {
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                gatt.writeDescriptor(cccd)
+                Log.i(TAG, "LEFT arm subscribing to 6402")
+            } else {
+                Log.w(TAG, "LEFT arm 6402 missing CCCD")
+            }
+        }
+
+        @Deprecated("Deprecated in API 33")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val data = characteristic.value ?: return
+            routeLeftAudioNotification(characteristic.uuid, data)
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            routeLeftAudioNotification(characteristic.uuid, value)
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            val charUuid = descriptor.characteristic?.uuid
+            Log.i(TAG, "LEFT CCCD written for char=$charUuid status=$status")
+        }
+    }
+
+    private fun routeLeftAudioNotification(charUuid: java.util.UUID, data: ByteArray) {
+        if (charUuid != UUID_CHAR_NOTIFY_AUDIO) return
+        val hex = data.take(16).joinToString(" ") { String.format("%02x", it) }
+        val suffix = if (data.size > 16) "..." else ""
+        Log.d(TAG, "LEFT NOTIFY ← ${data.size}B char=$charUuid hex=$hex$suffix")
+        lastAudioNotifyMs = System.currentTimeMillis()
+        if (data.size > 8) {
+            lastAudioDataMs = lastAudioNotifyMs
+            _audioNotifyFlow.tryEmit(data)
+        } else {
+            Log.d(TAG, "LEFT audio control packet (${data.size}B) ignored")
+        }
+    }
+
     // ──────────────────── Serialized BLE write ────────────────────
 
     /**
      * Write a raw byte array to fff2 with WRITE_TYPE_NO_RESPONSE.
      * Serialized with a latch so we never overlap two GATT writes.
      */
-    private fun writeBytes(data: ByteArray): Boolean {
+    private fun writeBytes(
+        data: ByteArray,
+        characteristic: BluetoothGattCharacteristic? = writeChar
+    ): Boolean {
         val gatt = bluetoothGatt ?: return false
-        val char = writeChar ?: return false
+        val char = characteristic ?: return false
 
         synchronized(writeLock) {
             char.writeType = if (useWriteWithResponse)
@@ -330,6 +485,14 @@ class EvenG2NativeBleManager(private val context: Context) {
             offset = end
         }
         Log.d(TAG, "Raw bytes sent: ${data.size} bytes")
+    }
+
+    fun writeRawBytesToAudioChannel(data: ByteArray): Boolean {
+        val ok = writeBytes(data, audioWriteChar)
+        if (!ok) {
+            Log.w(TAG, "Audio channel raw write failed (${data.size} bytes)")
+        }
+        return ok
     }
 
     // ──────────────────── Envelope framing ────────────────────
@@ -427,12 +590,25 @@ class EvenG2NativeBleManager(private val context: Context) {
         Log.i(TAG, "Mic-enable command sent (payload=0x0F)")
     }
 
+    fun enableMicrophoneViaAudioChannel() {
+        val ok = writeRawBytesToAudioChannel(MIC_ENABLE_PAYLOAD)
+        Log.i(TAG, "Mic-enable via audio channel sent (payload=0x0F, ok=$ok)")
+    }
+
+    fun getLastAudioNotifyMs(): Long = lastAudioNotifyMs
+    fun getLastAudioDataMs(): Long = lastAudioDataMs
+
     // ──────────────────── Cleanup ────────────────────
 
     fun disconnect() {
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
+        leftAudioGatt?.disconnect()
+        leftAudioGatt?.close()
         bluetoothGatt = null
+        leftAudioGatt = null
+        leftAudioNotifyChar = null
         writeChar = null
+        audioWriteChar = null
     }
 }

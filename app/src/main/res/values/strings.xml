@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PSYOP-VISR</string>
+    <string name="enroll_me_button">ENROLL ME</string>
+    <string name="enroll_status_not_enrolled">ME profile: not enrolled</string>
+    <string name="enroll_status_enrolled">ME profile: enrolled</string>
+    <plurals name="enroll_status_enrolled_count">
+        <item quantity="one">ME profile: %d photo enrolled</item>
+        <item quantity="other">ME profile: %d photos enrolled</item>
+    </plurals>
+    <string name="enroll_status_processing">Enrolling ME from photo...</string>
+    <string name="enroll_status_decode_failed">Enrollment failed: could not read image</string>
+    <string name="enroll_toast_success">ME face enrolled</string>
+    <string name="enroll_mode_title">Update ME Profile</string>
+    <string name="enroll_mode_message">Current profile has %1$d enrolled photo(s). Add this image, or replace the profile?</string>
+    <string name="enroll_mode_append">Add Photo</string>
+    <string name="enroll_mode_replace">Replace Profile</string>
 </resources>

@@ -1,12 +1,24 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application") version "8.2.0"
     id("org.jetbrains.kotlin.android") version "1.9.0"
-    id("org.jetbrains.kotlin.kapt") version "1.9.0"
+}
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) {
+        f.inputStream().use { load(it) }
+    }
 }
 
 android {
     namespace = "com.evensocom.psyopvisr"
     compileSdk = 34
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "com.evensocom.psyopvisr"
@@ -16,6 +28,12 @@ android {
         versionName = "1.0-tactical"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField(
+            "String",
+            "ROBOFLOW_API_KEY",
+            "\"${localProps.getProperty("roboflow.api.key", "")}\""
+        )
     }
 
     buildTypes {
@@ -58,18 +76,27 @@ dependencies {
     // ML Kit on-device language identification
     implementation("com.google.mlkit:language-id:17.0.4")
 
+    // ML Kit on-device text recognition (bundled model — no download required)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // ML Kit face detection (fallback when MediaPipe face model asset is absent)
+    implementation("com.google.mlkit:face-detection:16.1.7")
+
     // Whisper.cpp for On-Device Speech-to-Text
     // We are simulating this via WhisperTranscriber, no external maven dependency loaded.
-
-    // SQLite/Room for Cultural Context Engine
-    val room_version = "2.6.0"
-    implementation("androidx.room:room-runtime:$room_version")
-    implementation("androidx.room:room-ktx:$room_version")
-    kapt("androidx.room:room-compiler:$room_version")
+    implementation("com.alphacephei:vosk-android:0.3.47")
 
     // Lifecycle Service for background processing
     implementation("androidx.lifecycle:lifecycle-service:2.6.2")
 
     // ARCore
     implementation("com.google.ar:core:1.41.0")
+
+    // TFLite for MobileCLIP
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+
+    // OpenCV (used by FaceDetectionEngine identity matching path)
+    implementation("org.opencv:opencv:4.9.0")
 }

@@ -2,10 +2,18 @@ package com.evensocom.psyopvisr.vision
 
 import android.util.Log
 import com.evensocom.psyopvisr.service.EvenG2TacticalService
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+// Note: VisualizationBus is in the same package (vision), no additional import needed.
 
 enum class VisionMode {
-    IDLE, MENU, FACE_SCAN, SYMBOL_SCAN, CULTURAL_CONTEXT, ROOM_ANALYSIS
+    IDLE, MENU, FACE_SCAN, SYMBOL_SCAN, CULTURAL_CONTEXT, ROOM_ANALYSIS, TRANSLATION
 }
 
 /**
@@ -28,11 +36,16 @@ sealed class ScanResult {
         val position: String,
         val context: String,
         val alertLevel: Int,
-        val confidence: Float
+        val confidence: Float,
+        val extras: List<String> = emptyList()   // additional detections (label + conf%)
     ) : ScanResult() {
         override fun toHudString(): String {
-            val prefix = if (alertLevel >= 2) "⚠ CRITICAL:" else ""
-            return "SYMBOL: $label / $position\n$prefix $context\nConf: ${(confidence * 100).toInt()}%"
+            val alert = if (alertLevel >= 2) "⚠ " else ""
+            val sb = StringBuilder()
+            sb.append("${alert}${label}  ${(confidence * 100).toInt()}%\n")
+            sb.append("[$position] ${context.take(28)}")
+            if (extras.isNotEmpty()) sb.append("\n").append(extras.take(2).joinToString("  "))
+            return sb.toString()
         }
     }
 
@@ -70,8 +83,14 @@ class VisionModeController(private val scope: CoroutineScope) {
 
     // ──────────────────── State ────────────────────
 
+    private val _modeFlow = MutableStateFlow(VisionMode.IDLE)
+    val modeFlow: StateFlow<VisionMode> = _modeFlow.asStateFlow()
+
     @Volatile var currentMode: VisionMode = VisionMode.IDLE
-        private set
+        private set(value) {
+            field = value
+            _modeFlow.value = value
+        }
 
     /** True while the countdown is running and frames should be processed. */
     @Volatile var isScanActive: Boolean = false
@@ -81,18 +100,32 @@ class VisionModeController(private val scope: CoroutineScope) {
         VisionMode.FACE_SCAN,
         VisionMode.SYMBOL_SCAN,
         VisionMode.CULTURAL_CONTEXT,
-        VisionMode.ROOM_ANALYSIS
+        VisionMode.ROOM_ANALYSIS,
+        VisionMode.TRANSLATION
     )
     private var menuIndex = 0
 
-    private var countdownJob: Job? = null
-    private var resultJob: Job? = null
-
-    // Last scan result for the RESULT display
-    private var pendingResult: ScanResult? = null
-
     // Optional callback invoked whenever a new scan starts, so callers can reset engine state
     var onScanStarted: (() -> Unit)? = null
+
+    /** Called when ROOM_ANALYSIS mode activates — signals TacticalInferenceEngine to start ARCore */
+    var onEnterRoomMode: (() -> Unit)? = null
+
+    /** Called when ROOM_ANALYSIS scan ends (tap or auto-timer) — signals to generate final summary */
+    var onRoomScanEnd: (() -> Unit)? = null
+
+    @Volatile var roomScanEndMode: String = "auto"           // "tap" or "auto"
+    @Volatile var roomAutoScanDurationMs: Long = 30_000L     // 30 seconds
+
+    private var roomAutoTimerJob: Job? = null
+
+    // Software double-tap detection: G2 sends two rapid TAPs rather than a DOUBLE_TAP packet
+    @Volatile private var lastTapMs = 0L
+    private val DOUBLE_TAP_WINDOW_MS = 700L   // 700ms window — generous for BLE latency
+
+    // HUD throttle: glasses display updates at most once every 5 seconds during active scan
+    @Volatile private var lastHudUpdateMs = 0L
+    private val HUD_UPDATE_INTERVAL_MS = 5_000L
 
     // ──────────────────── Gesture entry point ────────────────────
 
@@ -101,7 +134,58 @@ class VisionModeController(private val scope: CoroutineScope) {
         when (currentMode) {
             VisionMode.IDLE -> handleIdleGesture(gesture)
             VisionMode.MENU -> handleMenuGesture(gesture)
-            else -> { /* during countdown / result display, ignore gestures */ }
+            else -> handleScanGesture(gesture)
+        }
+    }
+
+    private fun handleScanGesture(gesture: GestureType) {
+        // If a scan has already ended (e.g. room summary shown), treat any tap/double-tap
+        // as an immediate return to menu instead of re-triggering end handlers.
+        if (!isScanActive) {
+            when (gesture) {
+                GestureType.TAP, GestureType.DOUBLE_TAP, GestureType.LONG_PRESS -> {
+                    cancelAndReturnToMenu()
+                    return
+                }
+                else -> return
+            }
+        }
+
+        when (gesture) {
+            GestureType.DOUBLE_TAP -> {
+                lastTapMs = 0L
+                if (currentMode == VisionMode.ROOM_ANALYSIS && roomScanEndMode == "tap") {
+                    roomAutoTimerJob?.cancel()
+                    endRoomScan()
+                } else {
+                    cancelAndReturnToMenu()
+                }
+            }
+            GestureType.TAP -> {
+                if (currentMode == VisionMode.ROOM_ANALYSIS && roomScanEndMode == "tap") {
+                    // In tap-end mode, a single tap should end the scan immediately.
+                    lastTapMs = 0L
+                    roomAutoTimerJob?.cancel()
+                    endRoomScan()
+                    return
+                }
+                val now = System.currentTimeMillis()
+                val prev = lastTapMs
+                if (now - prev < DOUBLE_TAP_WINDOW_MS) {
+                    // Two rapid taps — treat as double-tap
+                    lastTapMs = 0L
+                    Log.d(TAG, "Software double-tap detected (${now - prev}ms between taps)")
+                    if (currentMode == VisionMode.ROOM_ANALYSIS && roomScanEndMode == "tap") {
+                        roomAutoTimerJob?.cancel()
+                        endRoomScan()
+                    } else {
+                        cancelAndReturnToMenu()
+                    }
+                } else {
+                    lastTapMs = now
+                }
+            }
+            else -> { /* swipes ignored during scan */ }
         }
     }
 
@@ -120,14 +204,12 @@ class VisionModeController(private val scope: CoroutineScope) {
                 menuIndex = (menuIndex - 1 + menuItems.size) % menuItems.size
                 renderMenu()
             }
-            // TAP or DOUBLE_TAP = select current item and start scan countdown
-            GestureType.TAP, GestureType.DOUBLE_TAP -> {
+            GestureType.TAP -> {
                 val selected = menuItems[menuIndex]
-                startCountdown(selected)
+                startScan(selected)
             }
-            GestureType.LONG_PRESS -> {
-                cancelAndReturnToIdle()
-            }
+            GestureType.DOUBLE_TAP -> cancelAndReturnToIdle()
+            GestureType.LONG_PRESS -> cancelAndReturnToIdle()
         }
     }
 
@@ -140,30 +222,24 @@ class VisionModeController(private val scope: CoroutineScope) {
             return
         }
         Log.i(TAG, "Voice activation: $mode")
-        startCountdown(mode)
+        startScan(mode)
     }
 
     // ──────────────────── Scan frame entry point ────────────────────
 
     /**
      * Called by TacticalInferenceEngine once per analysis frame during an active scan.
-     *
-     * If the result is a frame-confirmation progress report (ErrorResult starting with "SCANNING"),
-     * the HUD is updated with progress but the scan stays active. Any other result (real detection
-     * or non-progress error) stops the scan and shows the final result.
+     * Scanning is continuous. HUD updates are throttled to [HUD_UPDATE_INTERVAL_MS] (5s)
+     * to avoid flickering. The Android phone overlay updates every frame regardless
+     * (driven by VisualizationBus directly from the engines).
      */
     fun onScanFrame(result: ScanResult) {
         if (!isScanActive) return
-        if (result is ScanResult.ErrorResult && result.message.startsWith("SCANNING")) {
-            // Still confirming frames — update HUD with progress but keep scan active
+        val now = System.currentTimeMillis()
+        if (now - lastHudUpdateMs >= HUD_UPDATE_INTERVAL_MS) {
+            lastHudUpdateMs = now
             pushHud(result.toHudString())
-            return
         }
-        // Real result (or non-progress error) — stop scan and show result
-        isScanActive = false
-        pendingResult = result
-        countdownJob?.cancel()
-        showResult(result)
     }
 
     // ──────────────────── State transitions ────────────────────
@@ -175,44 +251,34 @@ class VisionModeController(private val scope: CoroutineScope) {
         Log.i(TAG, "Entered MENU")
     }
 
-    private fun startCountdown(mode: VisionMode) {
+    private fun startScan(mode: VisionMode) {
         currentMode = mode
-        countdownJob?.cancel()
-        // Notify registered engines to reset frame-confirmation state
+        isScanActive = true
+        lastTapMs = 0L
+        lastHudUpdateMs = 0L  // allow first real result to push immediately
         onScanStarted?.invoke()
-        countdownJob = scope.launch {
-            val totalSeconds = 5
-            for (remaining in totalSeconds downTo 1) {
-                val bar = buildProgressBar(totalSeconds - remaining, totalSeconds)
-                val label = modeLabel(mode)
-                pushHud("$label\n$bar ${remaining}s")
-                isScanActive = true
-                delay(1_000)
-            }
-            // If we get here with no frame result, timeout
-            if (isScanActive) {
-                isScanActive = false
-                Log.w(TAG, "Scan timeout for $mode — no frame result received")
-                showResult(ScanResult.ErrorResult("SCAN TIMEOUT\nNo result obtained"))
-            }
+        if (mode == VisionMode.ROOM_ANALYSIS) {
+            onEnterRoomMode?.invoke()
+            startRoomAutoTimerIfNeeded()
         }
-        Log.i(TAG, "Started countdown for $mode")
+        val modeLine = if (mode == VisionMode.TRANSLATION) "LISTENING..." else "SCANNING..."
+        pushHud("${modeLabel(mode)}\n$modeLine")
+        Log.i(TAG, "Started continuous scan for $mode")
     }
 
-    private fun showResult(result: ScanResult) {
-        resultJob?.cancel()
-        resultJob = scope.launch {
-            pushHud(result.toHudString())
-            delay(8_000)
-            returnToIdle()
-        }
-        Log.i(TAG, "Showing result for 8s: ${result.toHudString()}")
+    private fun cancelAndReturnToMenu() {
+        roomAutoTimerJob?.cancel()
+        isScanActive = false
+        lastTapMs = 0L
+        VisualizationBus.postFrame(null)
+        enterMenu()
+        Log.i(TAG, "Scan cancelled — returned to MENU")
     }
 
     private fun cancelAndReturnToIdle() {
-        countdownJob?.cancel()
-        resultJob?.cancel()
+        roomAutoTimerJob?.cancel()
         isScanActive = false
+        lastTapMs = 0L
         returnToIdle()
         Log.i(TAG, "Cancelled — returned to IDLE")
     }
@@ -220,13 +286,14 @@ class VisionModeController(private val scope: CoroutineScope) {
     private fun returnToIdle() {
         currentMode = VisionMode.IDLE
         isScanActive = false
+        VisualizationBus.postFrame(null)
         renderIdle()
     }
 
     // ──────────────────── HUD rendering ────────────────────
 
     private fun renderIdle() {
-        pushHud("[HOLD] Scan Menu")
+        pushHud("[TAP] Scan Menu")
     }
 
     private fun renderMenu() {
@@ -243,6 +310,39 @@ class VisionModeController(private val scope: CoroutineScope) {
             ?: Log.w(TAG, "Service not available, dropping HUD update")
     }
 
+    private fun startRoomAutoTimerIfNeeded() {
+        if (roomScanEndMode != "auto") return
+        roomAutoTimerJob?.cancel()
+        roomAutoTimerJob = scope.launch {
+            delay(roomAutoScanDurationMs)
+            if (currentMode == VisionMode.ROOM_ANALYSIS && isScanActive) {
+                Log.i(TAG, "Room auto-timer expired — ending scan")
+                endRoomScan()
+            }
+        }
+    }
+
+    private fun endRoomScan() {
+        isScanActive = false
+        onRoomScanEnd?.invoke()
+        pushHud("ROOM SCAN\nCOMPLETE\nTap to exit")
+    }
+
+    /**
+     * Called when room analysis cannot start or loses ARCore session.
+     * Exits active scan state and returns to menu with an explicit failure HUD.
+     */
+    fun failRoomScan(message: String) {
+        roomAutoTimerJob?.cancel()
+        isScanActive = false
+        lastTapMs = 0L
+        currentMode = VisionMode.MENU
+        menuIndex = 0
+        VisualizationBus.postFrame(null)
+        Log.w(TAG, "ROOM_ANALYSIS aborted: $message")
+        pushHud("ROOM ANALYSIS\n$message\n[TAP] Retry")
+    }
+
     // ──────────────────── Helpers ────────────────────
 
     private fun modeLabel(mode: VisionMode) = when (mode) {
@@ -250,18 +350,9 @@ class VisionModeController(private val scope: CoroutineScope) {
         VisionMode.SYMBOL_SCAN -> "SYMBOL SCAN"
         VisionMode.CULTURAL_CONTEXT -> "CULTURAL CTX"
         VisionMode.ROOM_ANALYSIS -> "ROOM ANALYSIS"
+        VisionMode.TRANSLATION -> "TRANSLATION"
         VisionMode.IDLE -> "IDLE"
         VisionMode.MENU -> "MENU"
     }
 
-    /**
-     * Builds a progress bar string like [■■□□□] where filledCount squares are filled.
-     * @param elapsedTicks number of elapsed ticks (0 = none filled)
-     * @param total total ticks
-     */
-    private fun buildProgressBar(elapsedTicks: Int, total: Int): String {
-        val filled = elapsedTicks.coerceIn(0, total)
-        val empty = total - filled
-        return "[" + "■".repeat(filled) + "□".repeat(empty) + "]"
-    }
 }

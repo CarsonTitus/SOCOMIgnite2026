@@ -2,33 +2,14 @@ package com.evensocom.psyopvisr.db
 
 import android.content.Context
 import androidx.annotation.WorkerThread
-import androidx.room.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-@Entity(tableName = "cultural_context")
 data class CulturalContext(
-    @PrimaryKey val label: String,
+    val label: String,
     val contextText: String,
     val alertLevel: Int // 0: Info, 1: Caution, 2: Critical
 )
-
-@Dao
-interface CulturalContextDao {
-    @Query("SELECT * FROM cultural_context WHERE label = :label LIMIT 1")
-    suspend fun getContextFor(label: String): CulturalContext?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertContext(context: CulturalContext)
-
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertAll(contexts: List<CulturalContext>)
-}
-
-@Database(entities = [CulturalContext::class], version = 1, exportSchema = false)
-abstract class AppDatabase : RoomDatabase() {
-    abstract fun culturalContextDao(): CulturalContextDao
-}
 
 /**
  * Pre-seeded tactical labels mapped to cultural context strings and alert levels.
@@ -61,30 +42,24 @@ private val TACTICAL_SEED_DATA = listOf(
 )
 
 class CulturalContextEngine(context: Context) {
-
-    private val db = Room.databaseBuilder(
-        context.applicationContext,
-        AppDatabase::class.java,
-        "tactical-context-db"
-    )
-        .addCallback(object : RoomDatabase.Callback() {
-            override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                super.onCreate(db)
-                // Seed is written via the DAO in a coroutine after the DB is first created.
-                // We schedule it on IO so it never blocks the calling thread.
-            }
-        })
-        .fallbackToDestructiveMigration()
-        .build()
-
-    private val dao = db.culturalContextDao()
+    @Suppress("unused")
+    private val appContext = context.applicationContext
+    @Volatile private var seeded = false
+    private val cache = LinkedHashMap<String, CulturalContext>()
 
     /**
-     * Must be called once after the database is first opened (e.g. from the service onCreate)
-     * to populate the seed data. Subsequent calls are no-ops due to IGNORE conflict strategy.
+     * Must be called once at startup; subsequent calls are no-ops.
      */
     suspend fun seedIfNeeded() = withContext(Dispatchers.IO) {
-        dao.insertAll(TACTICAL_SEED_DATA)
+        if (seeded) return@withContext
+        synchronized(cache) {
+            if (!seeded) {
+                for (entry in TACTICAL_SEED_DATA) {
+                    cache.putIfAbsent(entry.label.lowercase().trim(), entry)
+                }
+                seeded = true
+            }
+        }
     }
 
     /**
@@ -93,7 +68,8 @@ class CulturalContextEngine(context: Context) {
      */
     @WorkerThread
     suspend fun getContextFor(label: String): String? = withContext(Dispatchers.IO) {
-        dao.getContextFor(label.lowercase().trim())?.contextText
+        ensureSeeded()
+        cache[label.lowercase().trim()]?.contextText
     }
 
     /**
@@ -102,6 +78,19 @@ class CulturalContextEngine(context: Context) {
      */
     @WorkerThread
     suspend fun getContextFullEntry(label: String): CulturalContext? = withContext(Dispatchers.IO) {
-        dao.getContextFor(label.lowercase().trim())
+        ensureSeeded()
+        cache[label.lowercase().trim()]
+    }
+
+    private fun ensureSeeded() {
+        if (seeded) return
+        synchronized(cache) {
+            if (!seeded) {
+                for (entry in TACTICAL_SEED_DATA) {
+                    cache.putIfAbsent(entry.label.lowercase().trim(), entry)
+                }
+                seeded = true
+            }
+        }
     }
 }

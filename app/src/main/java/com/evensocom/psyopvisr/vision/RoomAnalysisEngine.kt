@@ -7,187 +7,431 @@ import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 import kotlin.math.sqrt
 
-/**
- * Performs a single-frame room/spatial analysis using the existing EfficientDet model.
- *
- * Analysis steps:
- *  1. Run ObjectDetector on the frame.
- *  2. Build a 3×3 spatial grid, tallying detections per cell.
- *  3. Estimate object distances from bounding box size.
- *  4. Attempt ARCore depth via Frame.acquireDepthImage16Bits() — graceful fallback if unavailable.
- *  5. Derive exit direction heuristics from clear regions.
- *  6. Return a formatted ROOM ANALYSIS summary.
- */
 class RoomAnalysisEngine(private val context: Context) {
+
+    private val arCoreAnalyzer = ArCoreRoomAnalyzer(context)
+    private val spatialAccumulator = SpatialAccumulator()
+    private var objectDetector: ObjectDetector? = null
+    private val prefs = context.getSharedPreferences("psyop_room_prefs", Context.MODE_PRIVATE)
+    private var consecutiveArFrameFailures: Int = 0
+    private var lastFrameWidth: Int = 640
+    private var lastFrameHeight: Int = 480
+    private var lastFrameRotationDegrees: Int = 0
+    private var originPoseX: Float? = null
+    private var originPoseZ: Float? = null
+    private var lastPoseX: Float? = null
+    private var lastPoseZ: Float? = null
+    private var totalTravelMeters: Float = 0f
+    private var maxRadiusMeters: Float = 0f
+    private var cameraFallbackActive: Boolean = false
+    private var cameraFallbackReason: String = ""
+    private var fallbackFrameCounter: Int = 0
+    private var fallbackHeadingDeg: Float = 0f
+    private var fallbackRadiusMeters: Float = 0.4f
+    private var fallbackBasePoseX: Float = 0f
+    private var fallbackBasePoseZ: Float = 0f
+    private val reusableRawDetections = ArrayList<RawDetection>(MAX_RESULTS)
 
     companion object {
         private const val TAG = "RoomAnalysisEngine"
         private const val MODEL_ASSET = "efficientdet.tflite"
-        private const val CONFIDENCE_THRESHOLD = 0.4f
-        private const val MAX_RESULTS = 20
+        private const val CONFIDENCE_THRESHOLD = 0.35f
+        private const val MAX_RESULTS = 15
+        private const val PREFS_SCAN_END_MODE = "room_scan_end_mode"
+        private const val DEFAULT_FRAME_WIDTH = 640
+        private const val DEFAULT_FRAME_HEIGHT = 480
+        private const val MOTION_PROGRESS_SCALE = 0.6f
+        private const val FALLBACK_HEADING_STEP_DEG = 9f
+        private const val FALLBACK_RADIUS_GROWTH_M = 0.025f
+        private const val FALLBACK_MAX_RADIUS_M = 2.6f
     }
-
-    private var objectDetector: ObjectDetector? = null
 
     init {
-        initDetector()
-    }
-
-    private fun initDetector() {
         try {
             val options = ObjectDetector.ObjectDetectorOptions.builder()
-                .setBaseOptions(
-                    BaseOptions.builder().setModelAssetPath(MODEL_ASSET).build()
-                )
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath(MODEL_ASSET).build())
                 .setMaxResults(MAX_RESULTS)
                 .setScoreThreshold(CONFIDENCE_THRESHOLD)
                 .build()
             objectDetector = ObjectDetector.createFromOptions(context, options)
-            Log.i(TAG, "RoomAnalysisEngine: ObjectDetector initialized")
+            Log.i(TAG, "ObjectDetector initialized")
         } catch (e: Exception) {
-            Log.w(TAG, "RoomAnalysisEngine: model load failed ($MODEL_ASSET missing): $e")
+            Log.w(TAG, "ObjectDetector init failed (model missing?): $e")
             objectDetector = null
         }
     }
 
-    // ──────────────────── Analysis ────────────────────
+    @Synchronized
+    fun startSession() {
+        spatialAccumulator.reset()
+        consecutiveArFrameFailures = 0
+        lastFrameWidth = DEFAULT_FRAME_WIDTH
+        lastFrameHeight = DEFAULT_FRAME_HEIGHT
+        lastFrameRotationDegrees = 0
+        resetMotionTracking()
+        resetFallbackPose()
+        cameraFallbackActive = false
+        cameraFallbackReason = ""
+        arCoreAnalyzer.start()
+        if (arCoreAnalyzer.isRunning) {
+            Log.i(TAG, "Room analysis session started")
+        } else {
+            Log.w(TAG, "Room analysis session failed to start (ARCore unavailable)")
+        }
+    }
 
-    /**
-     * Analyze a single camera frame and return a [ScanResult.RoomResult].
-     * The ImageProxy is NOT closed here.
-     */
-    fun analyze(imageProxy: ImageProxy): ScanResult {
-        val detector = objectDetector
-            ?: return ScanResult.RoomResult(
-                "ROOM ANALYSIS:\nMODEL NOT FOUND\nPlace efficientdet.tflite in assets/"
+    @Synchronized
+    fun stopSession() {
+        arCoreAnalyzer.stop()
+        consecutiveArFrameFailures = 0
+        cameraFallbackActive = false
+        cameraFallbackReason = ""
+        resetFallbackPose()
+        Log.i(TAG, "Room analysis session stopped")
+    }
+
+    @Synchronized
+    fun activateCameraFallback(reason: String) {
+        if (cameraFallbackActive && cameraFallbackReason == reason) return
+        cameraFallbackActive = true
+        cameraFallbackReason = reason
+        consecutiveArFrameFailures = 0
+        fallbackBasePoseX = lastPoseX ?: 0f
+        fallbackBasePoseZ = lastPoseZ ?: 0f
+        fallbackFrameCounter = 0
+        fallbackHeadingDeg = 0f
+        fallbackRadiusMeters = 0.4f
+        if (arCoreAnalyzer.isRunning) {
+            arCoreAnalyzer.stop()
+        }
+        Log.w(TAG, "CameraX fallback enabled for ROOM_ANALYSIS: $reason")
+    }
+
+    @Synchronized
+    fun isCameraFallbackActive(): Boolean = cameraFallbackActive
+
+    @Synchronized
+    fun analyzeFrame(): ScanResult {
+        if (cameraFallbackActive) {
+            val spatialObjects = spatialAccumulator.getAccumulatedObjects()
+            val roomEstimate = buildAdaptiveRoomEstimate(
+                baseEstimate = spatialAccumulator.getRoomEstimate(),
+                spatialObjects = spatialObjects
             )
+            publishRoomFrame(spatialObjects, roomEstimate, isScanning = true)
+            return ScanResult.RoomResult("ROOM SCAN\nCamera fallback active\nAwaiting CameraX frames")
+        }
+
+        if (!arCoreAnalyzer.isRunning) {
+            return ScanResult.RoomResult("ROOM SCAN\nSession not started")
+        }
+
+        val arFrame = arCoreAnalyzer.acquireFrame()
+            ?: run {
+                consecutiveArFrameFailures++
+                val spatialObjects = spatialAccumulator.getAccumulatedObjects()
+                val roomEstimate = buildAdaptiveRoomEstimate(
+                    baseEstimate = spatialAccumulator.getRoomEstimate(),
+                    spatialObjects = spatialObjects
+                )
+                publishRoomFrame(spatialObjects, roomEstimate, isScanning = true)
+                val status = if (consecutiveArFrameFailures > 12) {
+                    "Tracking unstable\nMove slowly and scan wider"
+                } else {
+                    "Initializing ARCore..."
+                }
+                return ScanResult.RoomResult("ROOM SCAN\n$status")
+            }
+        consecutiveArFrameFailures = 0
+        return analyzeBitmapFrame(
+            bitmap = arFrame.bitmap,
+            rotationDegrees = 0,
+            poseX = arFrame.poseX,
+            poseZ = arFrame.poseZ,
+            headingDeg = arFrame.headingDeg,
+            depthMeters = arFrame.depthMeters,
+            fallbackMode = false
+        )
+    }
+
+    @Synchronized
+    fun analyzeCameraFallbackFrame(imageProxy: ImageProxy): ScanResult {
+        if (!cameraFallbackActive) {
+            return ScanResult.RoomResult("ROOM SCAN\nARCore active")
+        }
 
         val bitmap: Bitmap = try {
             imageProxy.toBitmap()
         } catch (e: Exception) {
-            Log.w(TAG, "Frame conversion failed: $e")
-            return ScanResult.RoomResult("ROOM ANALYSIS:\nFRAME ERROR")
+            Log.w(TAG, "Camera fallback frame conversion failed: $e")
+            return ScanResult.RoomResult("ROOM SCAN\nCamera frame unavailable")
         }
 
+        val fallbackPose = nextFallbackPose()
+        return analyzeBitmapFrame(
+            bitmap = bitmap,
+            rotationDegrees = imageProxy.imageInfo.rotationDegrees,
+            poseX = fallbackPose.poseX,
+            poseZ = fallbackPose.poseZ,
+            headingDeg = fallbackPose.headingDeg,
+            depthMeters = null,
+            fallbackMode = true
+        )
+    }
+
+    @Synchronized
+    fun generateFinalSummary(): ScanResult {
+        val spatialObjects = spatialAccumulator.getAccumulatedObjects()
+        val roomEstimate = buildAdaptiveRoomEstimate(
+            baseEstimate = spatialAccumulator.getRoomEstimate(),
+            spatialObjects = spatialObjects
+        )
+        val frameCount = spatialAccumulator.getFrameCount()
+        publishRoomFrame(spatialObjects, roomEstimate, isScanning = false)
+
+        if (frameCount < 5) {
+            val fallbackHint = if (cameraFallbackActive) "\nCamera fallback received too few frames" else ""
+            return ScanResult.RoomResult(
+                "ROOM ANALYSIS FAILED\nInsufficient room tracking data$fallbackHint\nTry again with slower movement"
+            )
+        }
+
+        val summary = buildString {
+            appendLine("ROOM ANALYSIS COMPLETE")
+            if (cameraFallbackActive) {
+                appendLine("CAMERA FALLBACK (NO DEPTH)")
+            }
+            appendLine(roomEstimate.sizeCategory.uppercase())
+            if (roomEstimate.personCount > 0) appendLine("${roomEstimate.personCount} person(s) detected")
+            appendLine(roomEstimate.exitSummary)
+            if (spatialObjects.isEmpty()) {
+                append("Object map sparse; size inferred from movement")
+            } else {
+                append("${spatialObjects.size} objects mapped")
+            }
+        }
+
+        return ScanResult.RoomResult(summary.trimEnd())
+    }
+
+    fun getScanProgress(): Float = spatialAccumulator.getRoomEstimate().scanProgress
+
+    fun getScanEndMode(): String = prefs.getString(PREFS_SCAN_END_MODE, "auto") ?: "auto"
+
+    fun setScanEndMode(mode: String) {
+        require(mode == "tap" || mode == "auto") { "mode must be 'tap' or 'auto'" }
+        prefs.edit().putString(PREFS_SCAN_END_MODE, mode).apply()
+    }
+
+    fun getAutoScanDurationMs(): Long = 30_000L
+
+    fun isSessionRunning(): Boolean = arCoreAnalyzer.isRunning
+
+    @Synchronized
+    fun getConsecutiveArFrameFailures(): Int = consecutiveArFrameFailures
+
+    private data class FallbackPose(
+        val poseX: Float,
+        val poseZ: Float,
+        val headingDeg: Float
+    )
+
+    private fun nextFallbackPose(): FallbackPose {
+        fallbackFrameCounter++
+        fallbackHeadingDeg = (fallbackHeadingDeg + FALLBACK_HEADING_STEP_DEG) % 360f
+        fallbackRadiusMeters = min(
+            FALLBACK_MAX_RADIUS_M,
+            fallbackRadiusMeters + FALLBACK_RADIUS_GROWTH_M
+        )
+        val headingRad = Math.toRadians(fallbackHeadingDeg.toDouble())
+        val poseX = fallbackBasePoseX + (sin(headingRad) * fallbackRadiusMeters).toFloat()
+        val poseZ = fallbackBasePoseZ + (cos(headingRad) * fallbackRadiusMeters).toFloat()
+        return FallbackPose(
+            poseX = poseX,
+            poseZ = poseZ,
+            headingDeg = fallbackHeadingDeg
+        )
+    }
+
+    private fun analyzeBitmapFrame(
+        bitmap: Bitmap,
+        rotationDegrees: Int,
+        poseX: Float,
+        poseZ: Float,
+        headingDeg: Float,
+        depthMeters: Float?,
+        fallbackMode: Boolean
+    ): ScanResult {
+        lastFrameWidth = bitmap.width
+        lastFrameHeight = bitmap.height
+        lastFrameRotationDegrees = rotationDegrees
+        updateMotionTracking(poseX, poseZ)
+
+        val detections = runObjectDetection(bitmap)
+        spatialAccumulator.addFrame(
+            detections = detections,
+            devicePoseX = poseX,
+            devicePoseZ = poseZ,
+            headingDeg = headingDeg,
+            depthMeters = depthMeters
+        )
+
+        val spatialObjects = spatialAccumulator.getAccumulatedObjects()
+        val roomEstimate = buildAdaptiveRoomEstimate(
+            baseEstimate = spatialAccumulator.getRoomEstimate(),
+            spatialObjects = spatialObjects
+        )
+        publishRoomFrame(spatialObjects, roomEstimate, isScanning = true)
+
+        val progressPct = (roomEstimate.scanProgress * 100).toInt()
+        val summary = buildString {
+            if (fallbackMode) appendLine("CAMERA FALLBACK (NO DEPTH)")
+            appendLine(roomEstimate.sizeCategory.uppercase())
+            if (roomEstimate.personCount > 0) {
+                appendLine("Persons: ${roomEstimate.personCount}")
+            } else if (spatialObjects.isEmpty()) {
+                appendLine("Objects: none mapped yet")
+            } else {
+                appendLine("Objects: ${spatialObjects.size} mapped")
+            }
+            appendLine(roomEstimate.exitSummary)
+            append("SCAN: $progressPct% coverage")
+        }
+        return ScanResult.RoomResult(summary.trimEnd())
+    }
+
+    private fun runObjectDetection(bitmap: Bitmap): List<RawDetection> {
+        reusableRawDetections.clear()
+        val detector = objectDetector ?: return reusableRawDetections
         val frameW = bitmap.width.toFloat()
         val frameH = bitmap.height.toFloat()
         val frameArea = frameW * frameH
 
-        return try {
+        if (frameArea <= 0f) return reusableRawDetections
+
+        try {
             val mpImage = BitmapImageBuilder(bitmap).build()
             val detections = detector.detect(mpImage).detections() ?: emptyList()
-
-            // 3×3 grid: grid[row][col] = list of label strings detected in that cell
-            val grid = Array(3) { Array(3) { mutableListOf<String>() } }
-
-            var personCount = 0
-            val personPositions = mutableListOf<String>()
-            val distanceEstimates = mutableListOf<Float>() // in meters (rough heuristic)
-
-            for (detection in detections) {
-                val label = detection.categories()?.firstOrNull()?.categoryName() ?: continue
-                val bbox = detection.boundingBox()
-                val centerX = (bbox.left + bbox.right) / 2f
-                val centerY = (bbox.top + bbox.bottom) / 2f
-
-                val col = ((centerX / frameW) * 3).toInt().coerceIn(0, 2)
-                val row = ((centerY / frameH) * 3).toInt().coerceIn(0, 2)
-                grid[row][col].add(label)
-
-                // Rough distance: assume a person bbox at full height (1.7m subject) fills ~0.3 frame
-                // d ≈ referenceSize / observedFraction
-                val observedFraction = sqrt((bbox.width() * bbox.height()) / frameArea)
-                val distMeters = if (observedFraction > 0.01f) (0.15f / observedFraction) * 3f else 99f
-                distanceEstimates.add(distMeters)
-
-                if (label.equals("person", ignoreCase = true)) {
-                    personCount++
-                    personPositions.add(xSector(col))
-                }
+            for (det in detections) {
+                val category = det.categories()?.firstOrNull() ?: continue
+                val label = category.categoryName() ?: continue
+                val conf = category.score()
+                val bbox = det.boundingBox()
+                val centerXNorm = (((bbox.left + bbox.right) / 2f) / frameW).coerceIn(0f, 1f)
+                val centerYNorm = (((bbox.top + bbox.bottom) / 2f) / frameH).coerceIn(0f, 1f)
+                val bboxFrac = sqrt((bbox.width() * bbox.height()) / frameArea)
+                val estimatedDistM = if (bboxFrac > 0.01f) (0.18f / bboxFrac) * 2.5f else 8f
+                reusableRawDetections.add(
+                    RawDetection(
+                        label = label,
+                        centerXNorm = centerXNorm,
+                        centerYNorm = centerYNorm,
+                        estimatedDistanceM = estimatedDistM,
+                        confidence = conf
+                    )
+                )
             }
-
-            // Estimate room depth from average distance
-            val avgDist = if (distanceEstimates.isNotEmpty()) distanceEstimates.average().toFloat() else 0f
-            val spaceEstimate = when {
-                avgDist < 2f -> "~1-2m space est."
-                avgDist < 5f -> "~3-5m space est."
-                avgDist < 10f -> "~5-10m space est."
-                else -> ">10m space est."
-            }
-
-            // ARCore depth — best-effort, wrap in try/catch
-            val arCoreInfo = tryAcquireArCoreDepth()
-
-            // Exit heuristic: bottom-center (col=1, row=2) or top-center (col=1, row=0) clear
-            val exitDirection = determineExitDirection(grid)
-
-            // Build summary
-            val summary = buildString {
-                appendLine("ROOM ANALYSIS:")
-                if (arCoreInfo != null) appendLine(arCoreInfo) else appendLine(spaceEstimate)
-                if (personCount > 0) {
-                    appendLine("Persons: $personCount (${personPositions.joinToString(", ")})")
-                } else {
-                    appendLine("Persons: 0 detected")
-                }
-                appendLine("Objects: ${detections.size} detected")
-                append("Exits: $exitDirection")
-            }
-
-            ScanResult.RoomResult(summary.trimEnd())
-
         } catch (e: Exception) {
-            Log.e(TAG, "Room analysis failed: $e")
-            ScanResult.RoomResult("ROOM ANALYSIS:\nERROR: ${e.message?.take(50) ?: "Unknown"}")
+            Log.w(TAG, "EfficientDet inference failed: $e")
         }
+
+        return reusableRawDetections
     }
 
-    // ──────────────────── ARCore ────────────────────
+    private fun publishRoomFrame(
+        spatialObjects: List<SpatialObject>,
+        roomEstimate: RoomEstimate,
+        isScanning: Boolean
+    ) {
+        VisualizationBus.postFrame(
+            VisualizationFrame.RoomSpatialFrame(
+                imageWidth = lastFrameWidth,
+                imageHeight = lastFrameHeight,
+                rotationDegrees = lastFrameRotationDegrees,
+                spatialObjects = spatialObjects,
+                roomEstimate = roomEstimate,
+                isScanning = isScanning
+            )
+        )
+    }
 
-    /**
-     * Attempt to get depth info from ARCore. Returns a human-readable distance string
-     * or null if ARCore is not active/available.
-     */
-    private fun tryAcquireArCoreDepth(): String? {
-        return try {
-            // ARCore Frame is not directly accessible from a camera-only service context.
-            // When ARCore is integrated, inject the Frame reference and call:
-            //   val depthImage = arFrame.acquireDepthImage16Bits()
-            //   val centerDepth = readCenterDepthMm(depthImage) / 1000f
-            //   depthImage.close()
-            //   "Depth: %.1fm (ARCore)".format(centerDepth)
-            null // graceful no-op until ARCore session is wired in
-        } catch (e: Exception) {
-            Log.d(TAG, "ARCore depth not available: $e")
-            null
+    private fun resetMotionTracking() {
+        originPoseX = null
+        originPoseZ = null
+        lastPoseX = null
+        lastPoseZ = null
+        totalTravelMeters = 0f
+        maxRadiusMeters = 0f
+    }
+
+    private fun resetFallbackPose() {
+        fallbackFrameCounter = 0
+        fallbackHeadingDeg = 0f
+        fallbackRadiusMeters = 0.4f
+        fallbackBasePoseX = 0f
+        fallbackBasePoseZ = 0f
+    }
+
+    private fun updateMotionTracking(poseX: Float, poseZ: Float) {
+        if (originPoseX == null) {
+            originPoseX = poseX
+            originPoseZ = poseZ
         }
+
+        val previousX = lastPoseX
+        val previousZ = lastPoseZ
+        if (previousX != null && previousZ != null) {
+            totalTravelMeters += hypot(
+                (poseX - previousX).toDouble(),
+                (poseZ - previousZ).toDouble()
+            ).toFloat()
+        }
+
+        val originX = originPoseX ?: poseX
+        val originZ = originPoseZ ?: poseZ
+        val radius = hypot(
+            (poseX - originX).toDouble(),
+            (poseZ - originZ).toDouble()
+        ).toFloat()
+        maxRadiusMeters = max(maxRadiusMeters, radius)
+
+        lastPoseX = poseX
+        lastPoseZ = poseZ
     }
 
-    // ──────────────────── Helpers ────────────────────
+    private fun buildAdaptiveRoomEstimate(
+        baseEstimate: RoomEstimate,
+        spatialObjects: List<SpatialObject>
+    ): RoomEstimate {
+        if (spatialObjects.isNotEmpty()) return baseEstimate
 
-    private fun xSector(col: Int) = when (col) {
-        0 -> "LEFT"
-        1 -> "CENTER"
-        else -> "RIGHT"
+        val motionBasedSize = inferMotionSizeCategory()
+        val confidenceCap = when {
+            maxRadiusMeters >= 4f -> 0.75f
+            maxRadiusMeters >= 2f -> 0.6f
+            maxRadiusMeters >= 1f -> 0.45f
+            else -> 0.3f
+        }
+        return baseEstimate.copy(
+            sizeCategory = motionBasedSize,
+            confidence = min(baseEstimate.confidence, confidenceCap)
+        )
     }
 
-    /**
-     * Check bottom-center and top-center grid cells for exit directions.
-     * A cell is "clear" if it contains no large objects.
-     */
-    private fun determineExitDirection(grid: Array<Array<MutableList<String>>>): String {
-        val exits = mutableListOf<String>()
-        // Bottom-center (row=2, col=1) → FRONT direction
-        if (grid[2][1].isEmpty()) exits.add("FRONT possible")
-        // Top-center (row=0, col=1) → REAR direction
-        if (grid[0][1].isEmpty()) exits.add("REAR possible")
-        // Left side clear (all of col=0)
-        if ((0..2).all { row -> grid[row][0].isEmpty() }) exits.add("LEFT clear")
-        // Right side clear (all of col=2)
-        if ((0..2).all { row -> grid[row][2].isEmpty() }) exits.add("RIGHT clear")
-
-        return if (exits.isEmpty()) "No clear exits detected" else exits.joinToString(", ")
+    private fun inferMotionSizeCategory(): String {
+        val observedSpanMeters = max(maxRadiusMeters * 2f, totalTravelMeters * MOTION_PROGRESS_SCALE)
+        return when {
+            observedSpanMeters < 2f -> "small enclosed room"
+            observedSpanMeters < 5f -> "medium room"
+            observedSpanMeters < 10f -> "large open area"
+            else -> "wide open space"
+        }
     }
 }

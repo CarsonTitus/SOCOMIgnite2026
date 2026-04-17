@@ -18,6 +18,7 @@ import kotlinx.coroutines.*
  *   "symbol" / "symbol scan"     → SYMBOL_SCAN
  *   "cultural" / "context"       → CULTURAL_CONTEXT
  *   "room" / "room analysis" / "map" → ROOM_ANALYSIS
+ *   "translate" / "translation"   → TRANSLATION
  *   "cancel" / "stop"            → IDLE
  *
  * Listening loops continuously when the controller is in IDLE state.
@@ -156,6 +157,7 @@ class VoiceCommandEngine(private val context: Context) {
             lower.contains("symbol") -> VisionMode.SYMBOL_SCAN
             lower.contains("cultural") || lower.contains("context") -> VisionMode.CULTURAL_CONTEXT
             lower.contains("room") || lower.contains("map") -> VisionMode.ROOM_ANALYSIS
+            lower.contains("translate") || lower.contains("translation") -> VisionMode.TRANSLATION
             else -> null
         }
     }
