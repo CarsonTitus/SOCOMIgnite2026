@@ -1,0 +1,5 @@
+# Python 3.12. pyrealsense2 must match the installed librealsense SDK version (apt: librealsense2 2.58.4).
+open3d==0.20.0
+pyrealsense2==2.58.4.*
+opencv-python==5.0.0.93
+numpy==2.5.3

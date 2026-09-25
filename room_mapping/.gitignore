@@ -1,0 +1,13 @@
+# Local environment
+.venv/
+__pycache__/
+
+# Captured data: large, and may show people or sensitive locations. Never commit.
+recordings/
+output/
+samples/
+*.bag
+*.db3
+*.ply
+*.pcd
+d455_*.png
