@@ -29,15 +29,27 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 
 ```bash
 .venv/bin/python capture.py          # live preview: SPACE = start/stop recording, Q = quit
-.venv/bin/python reconstruct.py 1    # recording 001 → output/001_<date>_<time>_mesh.ply (+ _cloud.ply)
-.venv/bin/python view.py 1           # open the model in the Open3D viewer
+.venv/bin/python reconstruct.py 1                  # recording 001 → output/001_<date>_<time>_mesh.ply (+ _cloud.ply), ~10 s
+.venv/bin/python reconstruct.py 1 --loop-closure   # also corrects drift → ..._lc_mesh.ply, ~1 min
+.venv/bin/python view.py 1                         # open the model in the Open3D viewer (--lc for the loop-closed one)
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
 ```
 
 Recordings are saved to `recordings/NNN_YYYYMMDD_HHMMSS/`, with depth as lossless PNG and colour as JPEG (~6.5 MB/s).
 A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
 
-**Scanning tips:** move slowly, stay within about 2.5 m of surfaces, and overlap your views.
+### Recording on a laptop (walking scans)
+`capture.py` only needs the camera, not an NVIDIA GPU, so any laptop with a **USB 3 port** works for walking around.
+- **Use a USB 3 / Thunderbolt cable.** Many USB-C cables are USB 2 only, and on those the D455 drops to USB 2.1.
+  Check with `rs-enumerate-devices -s` (should say 3.x) or the "USB 3.2" label in realsense-viewer.
+- **Ubuntu laptop:** same setup as above.
+- **Windows laptop:** skip the apt step. `pip install -r requirements.txt` brings the SDK inside `pyrealsense2`.
+  Use `.venv\Scripts\python capture.py` instead of `.venv/bin/python capture.py`.
+- Reconstruction runs on a laptop too (it falls back to the CPU without CUDA), but it is much slower, and
+  `--loop-closure` can take several minutes. Alternatively, copy `recordings/NNN_…` back to the GPU PC and reconstruct there.
+
+**Scanning tips:** move slowly, stay within about 2.5 m of surfaces, overlap your views, and finish where you started
+(that's what lets loop closure fix drift).
 
 `recordings/`, `output/` and `samples/` are gitignored. **Don't commit captured data**, because it can show people and sensitive locations.
 
@@ -47,6 +59,7 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
 |---|---|
 | `capture.py` | Live preview + start/stop recording |
 | `reconstruct.py` | Recording → 3D model (Open3D dense RGB-D SLAM, uses CUDA if available) |
+| `loop_closure.py` | Drift correction for `reconstruct.py --loop-closure` (fragment pose graph) |
 | `view.py` / `play.py` | View a model / play back a recording |
 | `convert.py` | realsense-viewer `.db3`/`.bag` → compressed recording folder |
 | `rgbd_io.py` | Shared recording reader/writer |
@@ -54,5 +67,6 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
 
 ## Known issues
 
-- Tracking drifts a few cm over long scans, especially when surfaces are more than 3 m away. Loop closure is planned.
+- Tracking drifts a few cm over long scans. This is a systematic bias in Open3D's frame-to-model tracking that grows with voxel size.
+  `--loop-closure` corrects most of it when the scan revisits places (end your sweep where you started).
 - `pyrealsense2` must match the installed SDK version (2.58.4).

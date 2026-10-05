@@ -34,21 +34,26 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   at 848×480 depth / 640×480 colour @ 30 fps, about 6.5 MB/s. `--seconds N` records headless.
 - `convert.py`: realsense-viewer .db3/.bag → compressed recording folder (about 14× smaller, same reconstruction)
 - `play.py`: play back a recording as colour | depth video
-- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud)
+- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model)
+- `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
 
 ## Workflow
 1. `.venv/bin/python capture.py`: record a slow sweep of the room
-2. `.venv/bin/python reconstruct.py <number>`: build the model
-3. `.venv/bin/python view.py <number>`: view it
+2. `.venv/bin/python reconstruct.py <number> --loop-closure`: build the model (drop the flag for a fast preview)
+3. `.venv/bin/python view.py <number> --lc`: view it
 
 ## Gotchas
 - Open3D 0.20 `t.PointCloud.create_from_rgbd_image` with uint8 colour scales colours by 1/255 twice, so they come out black. `verify_d455_open3d.py` corrects for this.
-- Tracking drift (2026-09-23 stationary test, scene about 3.2 m away): 1 cm voxel drifted about 8 cm in 10 s; 5 mm voxel + depth-max 3 m about 5 cm.
-  Raw depth was stable (about 4 mm change), so the drift is frame-to-model tracking noise building up. Bilateral pre-filter: no effect.
-  Hybrid (colour) tracking: loses tracking immediately. 5 mm voxel on the full room scan peaked at 11.5 GB GPU memory, too much for
-  the Jetson's 8 GB shared memory. Keep 1 cm there. Next steps: scan within about 2.5 m; add pose-graph/loop closure.
+- Tracking drift is a **systematic bias in Open3D's frame-to-model tracking** (t.pipelines.slam), not camera noise.
+  On a stationary recording (003) the camera "moves" about 7-9 voxels in a consistent direction near the (+1,+1,+1)
+  grid diagonal: 14 cm at 2 cm voxels, 7.7 cm at 1 cm, 4.7 cm at 5 mm. This looks like a half-voxel raycast offset.
+  Frame-to-frame RGB-D odometry is worse (18-44 cm), so frame-to-model stays. The fix is `--loop-closure`
+  (loop_closure.py): 003 drift 7.7 → 3.2 cm (15-frame chunks); on room sweep 001 the end-to-start surface gap
+  went from a median 2.9 cm to 0.9 cm (30-frame chunks, the default; 61 s). Bias inside a chunk remains.
+  Bilateral pre-filter: no effect. Hybrid (colour) tracking in the SLAM model: loses tracking. 5 mm voxels on 001
+  need 11.5 GB GPU memory, too much for the Jetson; keep 1 cm.
 - `pyrealsense2` (pip) must match the apt SDK version (currently 2.58.4).
 
 ## Notes
@@ -56,5 +61,5 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - Open3D's pip wheels may not include RealSense support on every platform. Check this on the Jetson.
 
 ## Next steps
-1. Loop closure / pose-graph optimisation to fix tracking drift (see Gotchas)
+1. Loop closure is done. Possible next step: a fix for the frame-to-model bias itself (e.g. compensate the half-voxel offset)
 2. Live reconstruction on the Jetson (no raw recording), control from the Pixel over the hotspot
