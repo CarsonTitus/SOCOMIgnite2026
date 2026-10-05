@@ -106,7 +106,7 @@ def main():
     name = Path(args.recording).stem
     pcd = model.extract_pointcloud().to(o3c.Device("CPU:0"))
     mesh = model.extract_trianglemesh().to(o3c.Device("CPU:0"))
-    o3d.t.io.write_point_cloud(str(out / f"{name}_cloud.ply"), pcd)
+    write_cloud(out / f"{name}_cloud.ply", pcd)
     o3d.t.io.write_triangle_mesh(str(out / f"{name}_mesh.ply"), mesh)
     np.save(out / f"{name}_poses.npy", poses)
     print(f"Points: {pcd.point.positions.shape[0]:,}   Mesh triangles: {mesh.triangle.indices.shape[0]:,}")
@@ -124,12 +124,21 @@ def main():
         print_path_stats(lc_poses)
         pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, lc_poses, K, depth_scale, args.depth_max,
                                                args.voxel, args.block_count, device)
-        o3d.t.io.write_point_cloud(str(out / f"{name}_lc_cloud.ply"), pcd)
+        write_cloud(out / f"{name}_lc_cloud.ply", pcd)
         o3d.t.io.write_triangle_mesh(str(out / f"{name}_lc_mesh.ply"), mesh)
         np.save(out / f"{name}_lc_poses.npy", lc_poses)
         print(f"  Points: {pcd.point.positions.shape[0]:,}   Mesh triangles: {mesh.triangle.indices.shape[0]:,}")
         print(f"Wrote {out}/{name}_lc_cloud.ply, {name}_lc_mesh.ply, {name}_lc_poses.npy "
               f"(loop closure took {time.time() - t1:.0f} s)")
+
+
+def write_cloud(path, pcd):
+    """Write a point cloud with uint8 colours. Float colours are saved as 0-1 floats, which the legacy PLY reader
+    (used by `open3d draw` / view.py) divides by 255 again, so the cloud shows up nearly black."""
+    if "colors" in pcd.point:
+        pcd = pcd.clone()
+        pcd.point.colors = (pcd.point.colors.clip(0, 1) * 255).to(o3c.uint8)
+    o3d.t.io.write_point_cloud(str(path), pcd)
 
 
 def print_path_stats(poses):

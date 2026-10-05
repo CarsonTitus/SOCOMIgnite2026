@@ -86,6 +86,9 @@ def main():
     if "colors" in pcd.point and pcd.point.colors.max().item() <= 1.0 / 255 + 1e-6:
         pcd.point.colors = pcd.point.colors * 255.0
     n_points = pcd.point.positions.shape[0]
+    # Save colours as uint8: float colours get divided by 255 again by the legacy PLY reader (open3d draw / view.py)
+    if "colors" in pcd.point:
+        pcd.point.colors = (pcd.point.colors.clip(0, 1) * 255).to(o3d.core.Dtype.UInt8)
     o3d.t.io.write_point_cloud("d455_test.ply", pcd)
 
     print("\n--- Output ---")
