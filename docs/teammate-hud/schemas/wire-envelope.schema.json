@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TeamRelayWireEnvelope",
+  "description": "Wire schema for G2 Teammate HUD team tracking network protocol",
+  "type": "object",
+  "required": [
+    "version",
+    "type",
+    "teamId",
+    "senderId",
+    "seq",
+    "epoch",
+    "ts",
+    "auth",
+    "payload"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Protocol version"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "JOIN",
+        "JOIN_ACK",
+        "LEAVE",
+        "LOCATION_UPDATE",
+        "HEARTBEAT",
+        "TEAM_SNAPSHOT",
+        "ERROR"
+      ]
+    },
+    "teamId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "senderId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "epoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "auth": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

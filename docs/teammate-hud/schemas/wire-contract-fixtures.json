@@ -1,0 +1,194 @@
+{
+  "valid_messages": {
+    "join": {
+      "version": 1,
+      "type": "JOIN",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 0,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000000000,
+      "auth": "bearer-secret-token",
+      "payload": {
+        "callsign": "GHOST-1"
+      }
+    },
+    "join_ack": {
+      "version": 1,
+      "type": "JOIN_ACK",
+      "teamId": "alpha-squadron",
+      "senderId": "relay-server-0",
+      "seq": 1,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000000050,
+      "auth": "bearer-server-token",
+      "payload": {
+        "status": "ACCEPTED",
+        "assignedSlot": 1,
+        "maxMembers": 16,
+        "heartbeatIntervalMs": 20000
+      }
+    },
+    "location_update_full": {
+      "version": 1,
+      "type": "LOCATION_UPDATE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 15,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000015000,
+      "auth": "bearer-secret-token",
+      "payload": {
+        "callsign": "GHOST-1",
+        "lat": 34.052235,
+        "lon": -118.243683,
+        "alt": 142.5,
+        "heading": 35.0,
+        "acc": 2.5
+      }
+    },
+    "location_update_absent_heading": {
+      "version": 1,
+      "type": "LOCATION_UPDATE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-02",
+      "seq": 8,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000015100,
+      "auth": "bearer-secret-token",
+      "payload": {
+        "callsign": "VIPER-2",
+        "lat": 34.053100,
+        "lon": -118.242500,
+        "acc": 4.0
+      }
+    },
+    "heartbeat": {
+      "version": 1,
+      "type": "HEARTBEAT",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 16,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000035000,
+      "auth": "bearer-secret-token",
+      "payload": {}
+    },
+    "leave": {
+      "version": 1,
+      "type": "LEAVE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 17,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000045000,
+      "auth": "bearer-secret-token",
+      "payload": {
+        "reason": "RTB"
+      }
+    },
+    "team_snapshot": {
+      "version": 1,
+      "type": "TEAM_SNAPSHOT",
+      "teamId": "alpha-squadron",
+      "senderId": "relay-server-0",
+      "seq": 45,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000045100,
+      "auth": "bearer-server-token",
+      "payload": {
+        "count": 2,
+        "members": [
+          {
+            "id": "op-01",
+            "callsign": "GHOST-1",
+            "lat": 34.052235,
+            "lon": -118.243683,
+            "heading": 35.0,
+            "acc": 2.5,
+            "ts": 1700000015000
+          },
+          {
+            "id": "op-02",
+            "callsign": "VIPER-2",
+            "lat": 34.053100,
+            "lon": -118.242500,
+            "acc": 4.0,
+            "ts": 1700000015100
+          }
+        ]
+      }
+    },
+    "error": {
+      "version": 1,
+      "type": "ERROR",
+      "teamId": "alpha-squadron",
+      "senderId": "relay-server-0",
+      "seq": 2,
+      "epoch": "epoch-7f3b8901-d70a-4a6c",
+      "ts": 1700000000100,
+      "auth": "bearer-server-token",
+      "payload": {
+        "code": 401,
+        "message": "UNAUTHORIZED_TEAM_ACCESS"
+      }
+    }
+  },
+  "invalid_fixtures": {
+    "latitude_out_of_bounds": {
+      "version": 1,
+      "type": "LOCATION_UPDATE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 1,
+      "epoch": "epoch-1",
+      "ts": 1700000000000,
+      "auth": "auth",
+      "payload": { "lat": 95.0, "lon": 0.0, "acc": 1.0 }
+    },
+    "longitude_out_of_bounds": {
+      "version": 1,
+      "type": "LOCATION_UPDATE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 1,
+      "epoch": "epoch-1",
+      "ts": 1700000000000,
+      "auth": "auth",
+      "payload": { "lat": 0.0, "lon": -185.0, "acc": 1.0 }
+    },
+    "heading_out_of_bounds": {
+      "version": 1,
+      "type": "LOCATION_UPDATE",
+      "teamId": "alpha-squadron",
+      "senderId": "op-01",
+      "seq": 1,
+      "epoch": "epoch-1",
+      "ts": 1700000000000,
+      "auth": "auth",
+      "payload": { "lat": 0.0, "lon": 0.0, "heading": 360.0, "acc": 1.0 }
+    },
+    "invalid_version": {
+      "version": 2,
+      "type": "JOIN",
+      "teamId": "team",
+      "senderId": "op",
+      "seq": 0,
+      "epoch": "epoch-1",
+      "ts": 1700000000000,
+      "auth": "auth",
+      "payload": {}
+    },
+    "blank_team_id": {
+      "version": 1,
+      "type": "JOIN",
+      "teamId": "",
+      "senderId": "op",
+      "seq": 0,
+      "epoch": "epoch-1",
+      "ts": 1700000000000,
+      "auth": "auth",
+      "payload": {}
+    }
+  }
+}
