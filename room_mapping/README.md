@@ -32,7 +32,7 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 .venv/bin/python reconstruct.py 1                  # recording 001 → output/001_<date>_<time>_mesh.ply (+ _cloud.ply), ~10 s
 .venv/bin/python reconstruct.py 1 --loop-closure   # also corrects drift → ..._lc_mesh.ply, ~1 min
 .venv/bin/python view.py 1                         # open the model in the Open3D viewer (--lc for the loop-closed one)
-.venv/bin/python view.py 1 --slice               # level it, cut off the ceiling (above 1.5 m; --slice 2.2 etc.), view from the top
+.venv/bin/python view.py 1 --slice               # level it, cut 0.5 m off the top (--slice 1.0 etc.), view from the top
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
 ```
 

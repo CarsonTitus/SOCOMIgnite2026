@@ -7,8 +7,8 @@ Usage:
     python view.py 1              # output/001_<date>_<time>_mesh.ply
     python view.py 1 --cloud      # the point cloud instead of the mesh
     python view.py 1 --lc         # the loop-closed model (reconstruct.py --loop-closure)
-    python view.py 1 --slice      # level the model, cut off everything above 1.5 m (the ceiling), view from the top
-    python view.py 1 --slice 2.2  # same, cut at 2.2 m above the floor
+    python view.py 1 --slice      # level the model, cut 0.5 m off the top (the ceiling), view from the top
+    python view.py 1 --slice 1.0  # same, cut 1.0 m off the top
     python view.py some/file.ply
 """
 import argparse
@@ -33,23 +33,25 @@ def find_up(normals, seed=(0, -1, 0)):
     return up
 
 
-def find_floor(heights):
-    """Lowest height with a big share of horizontal surface (5 cm bins), so noise under the floor is ignored."""
+def floor_and_ceiling(heights):
+    """Lowest and highest heights with a big share of horizontal surface (5 cm bins), so stray points above the
+    ceiling or under the floor are ignored."""
     counts, edges = np.histogram(heights, bins=np.arange(heights.min(), heights.max() + 0.05, 0.05))
-    return edges[np.argmax(counts >= 0.2 * counts.max())]
+    big = np.flatnonzero(counts >= 0.2 * counts.max())
+    return edges[big[0]], edges[big[-1] + 1]
 
 
 def level(points, normals):
-    """Rotation + offset that puts up on +y and the floor at y = 0."""
+    """Rotation that puts up on +y, and the floor and ceiling heights along it."""
     up = find_up(normals)
     x = np.cross(up, [0, 0, 1])
     x /= np.linalg.norm(x)
     R = np.stack([x, up, np.cross(x, up)])  # rows: new x, y (up), z
     horiz = np.abs(normals @ up) > 0.95
-    return R, find_floor(points[horiz] @ up)
+    return R, *floor_and_ceiling(points[horiz] @ up)
 
 
-def view_sliced(path, cut):
+def view_sliced(path, off_top):
     import open3d as o3d
     mesh = o3d.io.read_triangle_mesh(str(path))
     if len(mesh.triangles):
@@ -61,11 +63,12 @@ def view_sliced(path, cut):
         small = geom.voxel_down_sample(0.05)
         small.estimate_normals()
         normals = np.asarray(small.normals)
-    R, floor = level(np.asarray(geom.vertices if geom is mesh else small.points), normals)
+    R, floor, ceiling = level(np.asarray(geom.vertices if geom is mesh else small.points), normals)
     geom.rotate(R, center=(0, 0, 0))
     geom.translate((0, -floor, 0))
     lo, hi = geom.get_min_bound(), geom.get_max_bound()
-    print(f"Room height {hi[1]:.2f} m above floor; showing 0 to {cut} m")
+    cut = ceiling - floor - off_top
+    print(f"Ceiling {ceiling - floor:.2f} m above floor; showing 0 to {cut:.2f} m")
     geom = geom.crop(o3d.geometry.AxisAlignedBoundingBox((lo[0], -0.2, lo[2]), (hi[0], cut, hi[2])))
     centre = (lo + hi) / 2
     centre[1] = 0
@@ -79,7 +82,7 @@ def main():
     ap.add_argument("model")
     ap.add_argument("--cloud", action="store_true")
     ap.add_argument("--lc", action="store_true")
-    ap.add_argument("--slice", type=float, nargs="?", const=1.5, metavar="HEIGHT")
+    ap.add_argument("--slice", type=float, nargs="?", const=0.5, metavar="METRES_OFF_TOP")
     args = ap.parse_args()
     arg, kind = args.model, ("lc_" if args.lc else "") + ("cloud" if args.cloud else "mesh")
     if Path(arg).exists():

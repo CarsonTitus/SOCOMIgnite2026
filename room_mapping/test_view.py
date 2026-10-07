@@ -1,4 +1,5 @@
-"""Check view.level(): a tilted, shifted box room comes out with the floor at y = 0 and the ceiling at its height.
+"""Check view.level(): a tilted, shifted box room comes out with the floor at y = 0 and the ceiling
+found at its height.
 Run: .venv/bin/python test_view.py"""
 import numpy as np
 from view import level
@@ -18,8 +19,9 @@ flip = np.diag([1, -1, -1])
 M = tilt @ flip
 pts, nrm = (pts - (0, 1.6, 0)) @ M.T, nrm @ M.T
 
-R, fl = level(pts, nrm)
+R, fl, ce = level(pts, nrm)
 y = (pts @ R.T)[:, 1] - fl
 assert abs(np.median(y[:n])) < 0.03, np.median(y[:n])
+assert abs(ce - fl - H) < 0.1, ce - fl
 assert abs(np.median(y[n:2 * n]) - H) < 0.03, np.median(y[n:2 * n])
 print("ok: floor", round(float(np.median(y[:n])), 3), "ceiling", round(float(np.median(y[n:2 * n])), 3))

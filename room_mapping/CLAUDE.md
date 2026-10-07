@@ -35,7 +35,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `convert.py`: realsense-viewer .db3/.bag → compressed recording folder (about 14× smaller, same reconstruction)
 - `play.py`: play back a recording as colour | depth video
 - `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model,
-  `--slice [H]` levels it from floor/ceiling normals, cuts above H m (default 1.5) and opens top-down; checked by `test_view.py`)
+  `--slice [M]` levels it from floor/ceiling normals, cuts M m (default 0.5) off below the ceiling and opens top-down; checked by `test_view.py`)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
