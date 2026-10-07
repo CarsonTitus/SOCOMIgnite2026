@@ -34,7 +34,8 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   at 848×480 depth / 640×480 colour @ 30 fps, about 6.5 MB/s. `--seconds N` records headless.
 - `convert.py`: realsense-viewer .db3/.bag → compressed recording folder (about 14× smaller, same reconstruction)
 - `play.py`: play back a recording as colour | depth video
-- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model)
+- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model,
+  `--slice [H]` levels it from floor/ceiling normals, cuts above H m (default 1.5) and opens top-down; checked by `test_view.py`)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
@@ -54,6 +55,9 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   went from a median 2.9 cm to 0.9 cm (30-frame chunks, the default; 61 s). Bias inside a chunk remains.
   Bilateral pre-filter: no effect. Hybrid (colour) tracking in the SLAM model: loses tracking. 5 mm voxels on 001
   need 11.5 GB GPU memory, too much for the Jetson; keep 1 cm.
+- Windows in view break tracking: on 006 frame-to-model tracking failed looking out bright windows and never recovered
+  (834/1294 frames lost); `--depth-max 6` didn't help (465 tracked). Blinds closed (007): 0 lost. Tracking can't re-acquire after a loss.
+- `o3d.visualization.draw()` segfaulted in-process on the Windows laptop; `view.py --slice` uses legacy `draw_geometries`.
 - `pyrealsense2` (pip) must match the apt SDK version (currently 2.58.4).
 
 ## Notes

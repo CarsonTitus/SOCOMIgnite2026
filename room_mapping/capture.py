@@ -79,7 +79,7 @@ def main():
         folder = next_recording_folder(args.out)
         writer = FrameWriter(folder, K, (DEPTH_H, DEPTH_W), depth_scale, FPS)
         rec_start, last_fn, cam_dropped = time.time(), None, 0
-        print(f"● Recording to {folder}")
+        print(f"REC: Recording to {folder}")
 
     def stop_recording():
         nonlocal writer
@@ -89,7 +89,7 @@ def main():
         writer.close()
         dur = time.time() - rec_start
         mb = folder_size_mb(writer.folder)
-        print(f"■ Stopped: {writer.count} frames, {dur:.1f} s, {mb:.0f} MB ({mb / max(dur, 1e-6):.1f} MB/s), "
+        print(f"STOP: Stopped: {writer.count} frames, {dur:.1f} s, {mb:.0f} MB ({mb / max(dur, 1e-6):.1f} MB/s), "
               f"dropped {writer.meta['dropped']}")
         print(f"  Reconstruct with: .venv/bin/python reconstruct.py {int(writer.folder.name.split('_')[0])}")
         writer = None

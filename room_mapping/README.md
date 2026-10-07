@@ -32,6 +32,7 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 .venv/bin/python reconstruct.py 1                  # recording 001 → output/001_<date>_<time>_mesh.ply (+ _cloud.ply), ~10 s
 .venv/bin/python reconstruct.py 1 --loop-closure   # also corrects drift → ..._lc_mesh.ply, ~1 min
 .venv/bin/python view.py 1                         # open the model in the Open3D viewer (--lc for the loop-closed one)
+.venv/bin/python view.py 1 --slice               # level it, cut off the ceiling (above 1.5 m; --slice 2.2 etc.), view from the top
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
 ```
 
@@ -49,7 +50,8 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
   `--loop-closure` can take several minutes. Alternatively, copy `recordings/NNN_…` back to the GPU PC and reconstruct there.
 
 **Scanning tips:** move slowly, stay within about 2.5 m of surfaces, overlap your views, and finish where you started
-(that's what lets loop closure fix drift).
+(that's what lets loop closure fix drift). **Close the blinds:** looking out bright windows made tracking fail
+for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds closed, lost none).
 
 `recordings/`, `output/` and `samples/` are gitignored. **Don't commit captured data**, because it can show people and sensitive locations.
 
