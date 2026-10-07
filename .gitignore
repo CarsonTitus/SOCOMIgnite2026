@@ -24,3 +24,6 @@ app/src/main/assets/*.so
 
 # OS
 .DS_Store
+
+# Screen/video recordings (may show people or sensitive locations)
+*.mp4
