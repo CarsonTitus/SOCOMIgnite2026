@@ -133,10 +133,11 @@ def view_measure(path, geom):
     win.add_child(panel)
 
     def on_layout(ctx):
-        r, pw = win.content_rect, 32 * em
-        scene.frame = gui.Rect(r.x, r.y, r.width - pw, r.height)
+        r = win.content_rect
+        pw = min(32 * em, r.width // 2)  # minimised / closing windows report width 0; a negative size crashes Filament
+        scene.frame = gui.Rect(r.x, r.y, max(r.width - pw, 1), max(r.height, 1))
         panel.frame = gui.Rect(r.get_right() - pw, r.y, pw, r.height)
-        info.frame = gui.Rect(r.x + 8, r.y + 8, r.width - pw - 16,
+        info.frame = gui.Rect(r.x + 8, r.y + 8, max(r.width - pw - 16, 1),
                               info.calc_preferred_size(ctx, gui.Widget.Constraints()).height)
     win.set_on_layout(on_layout)
 
