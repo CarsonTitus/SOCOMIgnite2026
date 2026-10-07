@@ -33,6 +33,7 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 .venv/bin/python reconstruct.py 1 --loop-closure   # also corrects drift → ..._lc_mesh.ply, ~1 min
 .venv/bin/python view.py 1                         # open the model in the Open3D viewer (--lc for the loop-closed one)
 .venv/bin/python view.py 1 --slice               # level it, cut 0.5 m off the top (--slice 1.0 etc.), view from the top
+.venv/bin/python view.py 1 --measure --slice     # Ctrl+click numbered points, connect pairs for distances (side panel)
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
 ```
 

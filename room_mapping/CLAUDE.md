@@ -36,6 +36,8 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `play.py`: play back a recording as colour | depth video
 - `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model,
   `--slice [M]` levels it from floor/ceiling normals, cuts M m (default 0.5) off below the ceiling and opens top-down; checked by `test_view.py`)
+  `--measure`: Open3D gui window, Ctrl+click drops numbered points (distance from viewpoint, height), side panel
+  connects pairs (distance, horizontal, vertical); 1 = orbit, 2 = fly (WASD, Q up, Z down)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
@@ -58,6 +60,9 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - Windows in view break tracking: on 006 frame-to-model tracking failed looking out bright windows and never recovered
   (834/1294 frames lost); `--depth-max 6` didn't help (465 tracked). Blinds closed (007): 0 lost. Tracking can't re-acquire after a loss.
 - `o3d.visualization.draw()` segfaulted in-process on the Windows laptop; `view.py --slice` uses legacy `draw_geometries`.
+- `Scene.render_to_depth_image` (0.20, Windows/Vulkan) returns view-space depth in metres with inf for background,
+  not 0-1, and `Camera.unproject` gave NaN; `--measure` builds the ray from the inverse projection matrix instead.
+  The gui window exits with code 127 on close (Python finalisation error); harmless.
 - `pyrealsense2` (pip) must match the apt SDK version (currently 2.58.4).
 
 ## Notes
