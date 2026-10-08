@@ -248,6 +248,20 @@ def view_measure(path, geom):
     app.run()
 
 
+def find_model(arg, lc=False, cloud=False):
+    """A model path, or the model for recording number `arg` in output/ (mesh, or point cloud; loop-closed with lc)."""
+    kind = ("lc_" if lc else "") + ("cloud" if cloud else "mesh")
+    if Path(arg).exists():
+        return Path(arg)
+    if not arg.isdigit():
+        sys.exit(f"'{arg}' is not a file or a recording number")
+    matches = sorted(OUTPUT.glob(f"{int(arg):03d}_????????_??????_{kind}.ply"))
+    if not matches:
+        sys.exit(f"No {kind} for recording {int(arg):03d} in output/. "
+                 f"Build it with: .venv/bin/python reconstruct.py {arg}" + (" --loop-closure" if lc else ""))
+    return matches[0]
+
+
 def main():
     ap = argparse.ArgumentParser(usage=__doc__)
     ap.add_argument("model")
@@ -256,18 +270,7 @@ def main():
     ap.add_argument("--slice", type=float, nargs="?", const=0.5, metavar="METRES_OFF_TOP")
     ap.add_argument("--measure", action="store_true")
     args = ap.parse_args()
-    arg, kind = args.model, ("lc_" if args.lc else "") + ("cloud" if args.cloud else "mesh")
-    if Path(arg).exists():
-        path = Path(arg)
-    elif arg.isdigit():
-        matches = sorted(OUTPUT.glob(f"{int(arg):03d}_????????_??????_{kind}.ply"))
-        if not matches:
-            sys.exit(f"No {kind} for recording {int(arg):03d} in output/. "
-                     f"Build it with: .venv/bin/python reconstruct.py {arg}"
-                     + (" --loop-closure" if args.lc else ""))
-        path = matches[0]
-    else:
-        sys.exit(f"'{arg}' is not a file or a recording number")
+    path = find_model(args.model, args.lc, args.cloud)
     print(f"Opening {path}")
     if args.measure:
         view_measure(path, load_level(path, args.slice))

@@ -56,6 +56,23 @@ for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds 
 
 `recordings/`, `output/` and `samples/` are gitignored. **Don't commit captured data**, because it can show people and sensitive locations.
 
+### Walking through a scan in Unity
+1. Export the model: `.venv/bin/python export_unity.py 7 --lc` writes `output/unity/<name>.glb`
+   (levelled with the floor at y = 0, decimated to 300k triangles, scan colours with an unlit material; ~2 min).
+2. In Unity Hub, create a **Universal 3D** project (Unity 6) **outside this repo**.
+3. Window > Package Manager > + > *Add package by name*: `com.unity.cloud.gltfast`.
+   The Input System package is already included in new Unity 6 projects.
+4. Copy `unity/ScanLoader.cs` and `unity/PlayerController.cs` into the project's `Assets/`.
+5. In the scene:
+   - Empty GameObject **Scan** + `ScanLoader`; set *Scan Path* to the full path of the `.glb`.
+   - Empty GameObject **Player** + `PlayerController` (adds a person-sized CharacterController).
+     Optionally add a Capsule child (remove its collider) so you can see yourself in third person.
+   - Set PlayerController's *Cam* to the Main Camera, and ScanLoader's *Player* to Player.
+6. Press Play. WASD to walk, mouse to look, Shift to run, V for first/third person, Esc to free the mouse.
+
+A build can load other scans without rebuilding: `./RoomWalk -scan /path/to/scan.glb`.
+Scans stay outside the Unity project and the repo.
+
 ## Files
 
 | File | Purpose |
@@ -64,6 +81,8 @@ for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds 
 | `reconstruct.py` | Recording → 3D model (Open3D dense RGB-D SLAM, uses CUDA if available) |
 | `loop_closure.py` | Drift correction for `reconstruct.py --loop-closure` (fragment pose graph) |
 | `view.py` / `play.py` | View a model / play back a recording |
+| `export_unity.py` | Model → levelled, decimated `.glb` for Unity |
+| `unity/*.cs` | Unity scripts: load a scan at runtime, first/third-person walking |
 | `convert.py` | realsense-viewer `.db3`/`.bag` → compressed recording folder |
 | `rgbd_io.py` | Shared recording reader/writer |
 | `verify_d455_open3d.py` | Camera + Open3D sanity check |

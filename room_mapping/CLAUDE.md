@@ -38,6 +38,9 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   `--slice [M]` levels it from floor/ceiling normals, cuts M m (default 0.5) off below the ceiling and opens top-down; checked by `test_view.py`)
   `--measure`: Open3D gui window, Ctrl+click drops numbered points (distance from viewpoint, height), side panel
   connects pairs (distance, horizontal, vertical); 1 = orbit, 2 = fly (WASD, Q up, Z down)
+- `export_unity.py`: model → `output/unity/<name>.glb` for Unity (levelled via view.load_level, quadric-decimated,
+  sRGB → linear COLOR_0, KHR_materials_unlit). Writes the glb itself: Open3D 0.20's glb writer made unreadable files.
+  Checked by `test_export_unity.py`. `unity/*.cs`: runtime loader (glTFast) + first/third-person controller (issue #37)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
