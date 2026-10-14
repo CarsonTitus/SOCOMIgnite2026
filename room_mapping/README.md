@@ -31,7 +31,7 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 .venv/bin/python capture.py          # live preview: SPACE = start/stop recording, Q = quit
 .venv/bin/python reconstruct.py 1                  # recording 001 → output/001_<date>_<time>_mesh.ply (+ _cloud.ply), ~10 s
 .venv/bin/python reconstruct.py 1 --loop-closure   # also corrects drift → ..._lc_mesh.ply, ~1 min
-.venv/bin/python view.py 1                         # open the model in the Open3D viewer (--lc for the loop-closed one)
+.venv/bin/python view.py 1                         # open the model (loop-closed if built; --plain for the original)
 .venv/bin/python view.py 1 --slice               # level it, cut 0.5 m off the top (--slice 1.0 etc.), view from the top
 .venv/bin/python view.py 1 --measure --slice     # Ctrl+click numbered points, connect pairs for distances (side panel)
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
@@ -57,7 +57,7 @@ for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds 
 `recordings/`, `output/` and `samples/` are gitignored. **Don't commit captured data**, because it can show people and sensitive locations.
 
 ### Walking through a scan in Unity
-1. Export the model: `.venv/bin/python export_unity.py 7 --lc` writes `output/unity/<name>.glb`
+1. Export the model: `.venv/bin/python export_unity.py 7` writes `output/unity/<name>.glb`
    (levelled with the floor at y = 0, decimated to 300k triangles, scan colours with an unlit material; ~2 min).
 2. In Unity Hub, create a **Universal 3D** project (Unity 6) **outside this repo**.
 3. Window > Package Manager > + > *Add package by name*: `com.unity.cloud.gltfast`.

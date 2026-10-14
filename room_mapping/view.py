@@ -4,9 +4,9 @@ view.py
 Opens a reconstructed model in the Open3D viewer, by recording number.
 
 Usage:
-    python view.py 1              # output/001_<date>_<time>_mesh.ply
+    python view.py 1              # recording 001's loop-closed mesh if there is one, else the plain mesh
     python view.py 1 --cloud      # the point cloud instead of the mesh
-    python view.py 1 --lc         # the loop-closed model (reconstruct.py --loop-closure)
+    python view.py 1 --plain      # the model without loop closure
     python view.py 1 --slice      # level the model, cut 0.5 m off the top (the ceiling), view from the top
     python view.py 1 --slice 1.0  # same, cut 1.0 m off the top
     python view.py 1 --measure    # Ctrl+click surfaces for distances (from the viewpoint and between clicks);
@@ -248,29 +248,34 @@ def view_measure(path, geom):
     app.run()
 
 
-def find_model(arg, lc=False, cloud=False):
-    """A model path, or the model for recording number `arg` in output/ (mesh, or point cloud; loop-closed with lc)."""
-    kind = ("lc_" if lc else "") + ("cloud" if cloud else "mesh")
+def find_model(arg, plain=False, cloud=False):
+    """A model path, or the model for recording number `arg` in output/: the loop-closed one when it exists
+    (it's clearly better), else the plain reconstruction. plain=True forces the plain one."""
     if Path(arg).exists():
         return Path(arg)
     if not arg.isdigit():
         sys.exit(f"'{arg}' is not a file or a recording number")
-    matches = sorted(OUTPUT.glob(f"{int(arg):03d}_????????_??????_{kind}.ply"))
-    if not matches:
-        sys.exit(f"No {kind} for recording {int(arg):03d} in output/. "
-                 f"Build it with: .venv/bin/python reconstruct.py {arg}" + (" --loop-closure" if lc else ""))
-    return matches[0]
+    kind = "cloud" if cloud else "mesh"
+    for k in ([] if plain else [f"lc_{kind}"]) + [kind]:
+        matches = sorted(OUTPUT.glob(f"{int(arg):03d}_????????_??????_{k}.ply"))
+        if matches:
+            if not plain and not k.startswith("lc_"):
+                print(f"No loop-closed model for {int(arg):03d}; using the plain one. "
+                      f"For a better one: .venv/bin/python reconstruct.py {arg} --loop-closure")
+            return matches[0]
+    sys.exit(f"No {kind} for recording {int(arg):03d} in output/. Build it with: "
+             f".venv/bin/python reconstruct.py {arg} --loop-closure")
 
 
 def main():
     ap = argparse.ArgumentParser(usage=__doc__)
     ap.add_argument("model")
     ap.add_argument("--cloud", action="store_true")
-    ap.add_argument("--lc", action="store_true")
+    ap.add_argument("--plain", action="store_true", help="the model without loop closure")
     ap.add_argument("--slice", type=float, nargs="?", const=0.5, metavar="METRES_OFF_TOP")
     ap.add_argument("--measure", action="store_true")
     args = ap.parse_args()
-    path = find_model(args.model, args.lc, args.cloud)
+    path = find_model(args.model, args.plain, args.cloud)
     print(f"Opening {path}")
     if args.measure:
         view_measure(path, load_level(path, args.slice))

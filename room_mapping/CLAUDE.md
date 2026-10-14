@@ -34,7 +34,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   at 848×480 depth / 640×480 colour @ 30 fps, about 6.5 MB/s. `--seconds N` records headless.
 - `convert.py`: realsense-viewer .db3/.bag → compressed recording folder (about 14× smaller, same reconstruction)
 - `play.py`: play back a recording as colour | depth video
-- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud, `--lc` for the loop-closed model,
+- `view.py`: open a model by number (`view.py 1`, `--cloud` for the point cloud; uses the loop-closed model when it exists, `--plain` for the original,
   `--slice [M]` levels it from floor/ceiling normals, cuts M m (default 0.5) off below the ceiling and opens top-down; checked by `test_view.py`)
   `--measure`: Open3D gui window, Ctrl+click drops numbered points (distance from viewpoint, height), side panel
   connects pairs (distance, horizontal, vertical); 1 = orbit, 2 = fly (WASD, Q up, Z down)
@@ -48,7 +48,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 ## Workflow
 1. `.venv/bin/python capture.py`: record a slow sweep of the room
 2. `.venv/bin/python reconstruct.py <number> --loop-closure`: build the model (drop the flag for a fast preview)
-3. `.venv/bin/python view.py <number> --lc`: view it
+3. `.venv/bin/python view.py <number>`: view it (loop-closed by default: the plain model curves in toward the ceiling)
 
 ## Gotchas
 - Open3D 0.20 `t.PointCloud.create_from_rgbd_image` with uint8 colour scales colours by 1/255 twice, so they come out black. `verify_d455_open3d.py` corrects for this.
@@ -72,6 +72,39 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - Keep code portable to the Jetson (ARM64, JetPack/L4T). Avoid x86-only dependencies.
 - Open3D's pip wheels may not include RealSense support on every platform. Check this on the Jetson.
 
+## Status and handoff (2026-10-14)
+Work moves between the Windows laptop (recording; has the D455) and the Ubuntu tower (GPU). Claude Code sessions and
+memory don't follow between machines, so this section is the handoff.
+
+- **Use the loop-closed model** for viewing, measuring and exporting (now the default in `view.py` / `export_unity.py`;
+  `--plain` for the original). On 007 the plain model curves in toward the ceiling; the loop-closed one looks right.
+- **Scans so far:** 007 (one room, blinds closed) is the good one: all 1354 frames tracked; loop-closed end gap 0.22 m.
+  006 lost 834/1294 frames looking out bright windows. Recordings live only on the laptop (gitignored).
+  Not yet checked against a tape measure.
+- **Unity walkthrough (issue #37):** `export_unity.py` + `unity/*.cs` pushed, progress commented on the issue.
+  C# not yet compiled; Unity is to be set up on the tower.
+- **D455 → Pixel 9 Pro XL over USB-C works** (2026-10-14), with the team's all-USB-3.2 C-to-C cable + dongle
+  (the camera didn't work on a non-3.2 setup). Tested with Dot3D Free 6.4.2: USB permission prompt, live feed, scan,
+  no disconnects over 1 min scan + 5 min running; battery 19% → 18% in low-power mode. Dot3D Free only saves `.dpX`,
+  DotProduct's format: tagged records + ~60 blocks of ~350 KB that are compressed/encrypted (entropy 7.995; not
+  zlib/deflate/lzma/bz2/LZ4/zstd). Not usable without Dot3D Pro export, so don't spend more time on it.
+
 ## Next steps
-1. Loop closure is done. Possible next step: a fix for the frame-to-model bias itself (e.g. compensate the half-voxel offset)
-2. Live reconstruction on the Jetson (no raw recording), control from the Pixel over the hotspot
+1. **Android D455 recorder (in progress, build on the tower):** a separate small app first, not inside PSYOP-VISR.
+   - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
+     (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
+     at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and
+     `export_unity.py` work unchanged on phone recordings.
+   - Use librealsense's Android support (`wrappers/android`; match SDK 2.58.x). Check whether a prebuilt `.aar` is
+     available for that version, otherwise build it with the NDK.
+   - The tower has never built Android apps: needs Android Studio (or JDK 17 + Android SDK command-line tools),
+     the NDK if librealsense is built from source, and platform-tools (`adb`). The user will install what's needed.
+   - Install/debug over **Wireless debugging** (`adb pair` / `adb connect`), because the phone's USB-C port is in use
+     by the camera.
+   - Getting recordings off the phone: the laptop doesn't show the phone over USB (work laptop); Google Drive worked.
+     Expect ~440 MB per minute of recording.
+2. Unity on the tower: create the project per README, test `unity/*.cs` with 007, check vertex colours (glTFast unlit).
+3. Tape-measure check of 007 (room dimensions, a door, a table) against `view.py 7 --measure`.
+4. Multi-room / hallway scan ending at the start, to test loop closure over a longer path (blinds closed, walk slowly,
+   keep features in view; may need `--voxel 0.02` or more `--block-count` memory).
+5. Later: live reconstruction on the Jetson, control from the Pixel over the hotspot; a fix for the frame-to-model bias.

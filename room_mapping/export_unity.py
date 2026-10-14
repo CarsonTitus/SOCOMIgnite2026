@@ -5,8 +5,8 @@ Exports a room model as a .glb for Unity: levelled (floor at y = 0, +Y up, metre
 with the scanned colours as vertex colours (glTF COLOR_0).
 
 Usage:
-    python export_unity.py 7                    # output/007_..._mesh.ply -> output/unity/007_..._mesh.glb
-    python export_unity.py 7 --lc               # the loop-closed model
+    python export_unity.py 7                    # loop-closed 007 if there is one -> output/unity/<name>.glb
+    python export_unity.py 7 --plain            # the model without loop closure
     python export_unity.py 7 --triangles 500000
     python export_unity.py some/file.ply
 """
@@ -61,12 +61,12 @@ def write_glb(dest, mesh):
 def main():
     ap = argparse.ArgumentParser(usage=__doc__)
     ap.add_argument("model", help="recording number or .ply path")
-    ap.add_argument("--lc", action="store_true", help="use the loop-closed model")
+    ap.add_argument("--plain", action="store_true", help="the model without loop closure")
     ap.add_argument("--triangles", type=int, default=300_000, help="target triangle count")
     ap.add_argument("--out", default=str(OUTPUT / "unity"))
     args = ap.parse_args()
 
-    path = find_model(args.model, args.lc)
+    path = find_model(args.model, args.plain)
     mesh = load_level(path)
     if not isinstance(mesh, o3d.geometry.TriangleMesh):
         raise SystemExit("Unity export needs a mesh, not a point cloud")
