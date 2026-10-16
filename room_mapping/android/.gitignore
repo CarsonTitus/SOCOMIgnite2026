@@ -1,0 +1,5 @@
+.gradle/
+build/
+local.properties
+# Built from librealsense source by build_librealsense_aar.sh (see README)
+app/libs/*.aar
