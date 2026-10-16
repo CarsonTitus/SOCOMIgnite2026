@@ -35,6 +35,7 @@ It's developed on an Ubuntu PC, and the target is an NVIDIA Jetson Orin Nano wor
 .venv/bin/python view.py 1 --slice               # level it, cut 0.5 m off the top (--slice 1.0 etc.), view from the top
 .venv/bin/python view.py 1 --measure --slice     # Ctrl+click numbered points, connect pairs for distances (side panel)
 .venv/bin/python play.py 1           # play the recording back as colour | depth video
+.venv/bin/python diagnose.py 7 8     # compare recordings: timing, usable depth, tracking quality → output/diagnose/007_008.png
 ```
 
 Recordings are saved to `recordings/NNN_YYYYMMDD_HHMMSS/`, with depth as lossless PNG and colour as JPEG (~6.5 MB/s).
@@ -49,6 +50,11 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
   Use `.venv\Scripts\python capture.py` instead of `.venv/bin/python capture.py`.
 - Reconstruction runs on a laptop too (it falls back to the CPU without CUDA), but it is much slower, and
   `--loop-closure` can take several minutes. Alternatively, copy `recordings/NNN_…` back to the GPU PC and reconstruct there.
+
+**Windows and far space:** frames with under 30% of the image within 3 m (`--weak-usable`) aren't tracked against the
+model or built into it; the camera pose is carried across them by colour + depth frame-to-frame odometry (up to 3 s),
+and building continues from there. `--depth-max` sets the model range (default 3 m; 5 m made 008 noisy and shattered),
+`--track-depth-max` the tracking range (3 m). `--no-bridge` restores the old behaviour (a loss starts a new segment).
 
 **Scanning tips:** move slowly, stay within about 2.5 m of surfaces, overlap your views, and finish where you started
 (that's what lets loop closure fix drift). **Close the blinds:** looking out bright windows made tracking fail
@@ -73,6 +79,37 @@ for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds 
 A build can load other scans without rebuilding: `./RoomWalk -scan /path/to/scan.glb`.
 Scans stay outside the Unity project and the repo.
 
+### Recording on the Pixel (Android app, in progress)
+`android/` is a small standalone app (not part of PSYOP-VISR) that does what `capture.py` does: live colour | depth
+preview and REC/STOP. Recordings use the same folder layout and settings, so `reconstruct.py`, `view.py` and
+`export_unity.py` work on them unchanged. The phone needs an all-USB-3.2 C-to-C cable to the D455.
+
+**Build (Ubuntu, no Android Studio needed).** Toolchain under `~/Android`: JDK 17 (Temurin), SDK command-line tools,
+then `sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;28.0.13004108" "cmake;3.22.1"`.
+```bash
+cd android
+./build_librealsense_aar.sh              # once: builds librealsense 2.58.4's AAR from source (~5 min) into app/libs/
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+JAVA_HOME=$(ls -d ~/Android/jdk-17*) ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Install over WiFi** (the phone's USB-C port is used by the camera). On the phone: Settings > System >
+Developer options > *Wireless debugging* > *Pair device with pairing code*. Then, with the phone and PC on the same network:
+```bash
+ADB=~/Android/Sdk/platform-tools/adb     # the apt adb is too old for wireless pairing
+$ADB pair <ip>:<pairing port>            # enter the 6-digit code
+$ADB connect <ip>:<port shown on the Wireless debugging screen>
+$ADB install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Use.** Open *D455 Recorder*, plug in the camera, allow USB and camera access. Wait for READY, then tap REC/STOP.
+Recordings go to `Android/data/com.socom.d455recorder/files/recordings/NNN_…` on the phone (~440 MB per minute).
+Copy one to the PC, renumbering so it doesn't clash with PC recordings:
+```bash
+$ADB pull /sdcard/Android/data/com.socom.d455recorder/files/recordings/001_20261014_101500 recordings/008_20261014_101500
+```
+`meta.json` has `"device": "android"`. Watch the *dropped* count on screen: if the phone can't keep up, the queue fills and frames are dropped.
+
 ## Files
 
 | File | Purpose |
@@ -80,9 +117,11 @@ Scans stay outside the Unity project and the repo.
 | `capture.py` | Live preview + start/stop recording |
 | `reconstruct.py` | Recording → 3D model (Open3D dense RGB-D SLAM, uses CUDA if available) |
 | `loop_closure.py` | Drift correction for `reconstruct.py --loop-closure` (fragment pose graph) |
+| `diagnose.py` | Compare recordings: metadata vs frames, timing, usable depth, tracking quality (+ plot) |
 | `view.py` / `play.py` | View a model / play back a recording |
 | `export_unity.py` | Model → levelled, decimated `.glb` for Unity |
 | `unity/*.cs` | Unity scripts: load a scan at runtime, first/third-person walking |
+| `android/` | Pixel recorder app (same recording format as `capture.py`) |
 | `convert.py` | realsense-viewer `.db3`/`.bag` → compressed recording folder |
 | `rgbd_io.py` | Shared recording reader/writer |
 | `verify_d455_open3d.py` | Camera + Open3D sanity check |

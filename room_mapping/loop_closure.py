@@ -25,6 +25,11 @@ REG_VOXEL = 0.02          # finest registration scale (m); coarser scales are 2x
 MIN_OVERLAP = 0.3         # ICP fitness needed to accept a loop-closure edge
 MAX_JUMP_M = 0.5          # reject loop edges that move a fragment further than this from the tracked pose...
 MAX_JUMP_DEG = 20.0       # ...or rotate it more than this (drift is small; big jumps are false matches)
+# Drift builds up slowly, so fragments close in time can't be far off: the allowed jump grows with the time between
+# them. On 008, ICP between pieces 2-8 s apart "found" 20-42 cm shifts with ~1 deg turn (sliding along flat walls),
+# which doubled the floor and ceiling; real corrections there were under 7 cm. 007's whole-scan end gap was 22 cm.
+JUMP_BASE = (0.05, 2.0)   # m, deg allowed between fragments right next to each other in time...
+JUMP_RATE = (0.01, 0.3)   # ...plus this much per second between them
 
 
 def new_volume(voxel, block_count, device):
@@ -108,7 +113,7 @@ def pose_change(a, b):
 
 
 def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel,
-                   fragment_size=30, device=o3c.Device("CPU:0")):
+                   fragment_size=30, device=o3c.Device("CPU:0"), fps=30):
     """Returns loop-closed camera-to-world poses for frame_ids, plus a stats dict."""
     poses = np.asarray(poses)
     clouds, starts = build_fragments(recording, frame_ids, poses, K, depth_scale, depth_max, voxel,
@@ -120,7 +125,7 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
     for p in frag_pose:
         graph.nodes.append(reg.PoseGraphNode(p))
 
-    loops, checked = 0, 0
+    loops, checked, edges = 0, 0, []
     for s in range(n):
         for t in range(s + 1, n):
             init = np.linalg.inv(frag_pose[t]) @ frag_pose[s]  # maps fragment s into fragment t's frame
@@ -134,7 +139,9 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
             checked += 1
             T, fitness, info = multiscale_icp(clouds[s], clouds[t], init)
             jump_m, jump_deg = pose_change(init, T)
-            plausible = jump_m < MAX_JUMP_M and jump_deg < MAX_JUMP_DEG
+            seconds = (frame_ids[starts[t]] - frame_ids[starts[s]]) / fps
+            plausible = (jump_m < min(MAX_JUMP_M, JUMP_BASE[0] + JUMP_RATE[0] * seconds) and
+                         jump_deg < min(MAX_JUMP_DEG, JUMP_BASE[1] + JUMP_RATE[1] * seconds))
             if adjacent:
                 if fitness < MIN_OVERLAP or not plausible:  # fall back to the tracked relative pose
                     T = init
@@ -144,6 +151,7 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
                 graph.edges.append(reg.PoseGraphEdge(s, t, T, info, uncertain=False))
             elif fitness >= MIN_OVERLAP and plausible:
                 graph.edges.append(reg.PoseGraphEdge(s, t, T, info, uncertain=True))
+                edges.append((s, t, fitness, jump_m, jump_deg, info))
                 loops += 1
 
     level = o3d.utility.get_verbosity_level()
@@ -163,8 +171,66 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
 
     end_shift_m, end_shift_deg = pose_change(poses[-1], corrected[-1])
     stats = {"fragments": n, "pairs_checked": checked, "loops_found": loops, "loops_kept": kept,
-             "end_shift_m": end_shift_m, "end_shift_deg": end_shift_deg}
+             "end_shift_m": end_shift_m, "end_shift_deg": end_shift_deg, "loop_edges": edges}
     return corrected, stats
+
+
+PLACE_VOXEL = 0.05        # global (feature) registration scale for joining segments (m)
+PLACE_MIN_FITNESS = 0.3   # share of a segment's points that must land on the placed model, from a global match...
+NEAR_MIN_FITNESS = 0.1    # ...or from near where the camera was last seen (a new segment often sees mostly new area)
+MAX_SPEED_M = 0.05        # handheld motion limits per frame (1.5 m/s, 120 deg/s at 30 fps), plus a margin below:
+MAX_TURN_DEG = 4.0        # a placement needing faster motion across the gap is a false match. On 008 the global
+MOTION_MARGIN = (0.3, 20.0)  # match put the room's mirror image 166 deg round after a 0.5 s gap.
+
+
+def global_match(src, tgt):
+    """FPFH + RANSAC registration (no initial guess needed). Returns a 4x4 transform mapping src onto tgt."""
+    feats = []
+    for p in (src, tgt):
+        d = p.voxel_down_sample(PLACE_VOXEL)
+        d.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=PLACE_VOXEL * 2, max_nn=30))
+        f = reg.compute_fpfh_feature(d, o3d.geometry.KDTreeSearchParamHybrid(radius=PLACE_VOXEL * 5, max_nn=100))
+        feats.append((d, f))
+    (s, sf), (t, tf) = feats
+    dist = PLACE_VOXEL * 1.5
+    r = reg.registration_ransac_based_on_feature_matching(
+        s, t, sf, tf, True, dist, reg.TransformationEstimationPointToPoint(False), 3,
+        [reg.CorrespondenceCheckerBasedOnEdgeLength(0.9), reg.CorrespondenceCheckerBasedOnDistance(dist)],
+        reg.RANSACConvergenceCriteria(1000000, 0.999))
+    return r.transformation
+
+
+def place_segments(clouds, last_poses, gaps):
+    """Joins separately tracked segments into one world frame. clouds[k] is segment k in its own frame (its first
+    camera pose = identity), last_poses[k] its last camera pose in that frame, gaps[k] the frames skipped before it.
+    Each segment is registered (multi-scale ICP) against everything placed so far, from where the previous segment
+    lost the camera and from a global feature match. A result is only kept if the camera could physically have moved
+    there during the gap and enough of the segment lands on the model. Returns (world pose or None, overlap, note)
+    per segment."""
+    world, results = [np.identity(4)], [(1.0, "")]
+    placed = o3d.geometry.PointCloud(clouds[0])
+    for k in range(1, len(clouds)):
+        last_seen = world[k - 1] @ last_poses[k - 1] if world[k - 1] is not None else None
+        limit = (MOTION_MARGIN[0] + MAX_SPEED_M * gaps[k], MOTION_MARGIN[1] + MAX_TURN_DEG * gaps[k])
+        bounded = last_seen is not None and limit[1] < 180
+        inits = ([last_seen] if last_seen is not None else []) + [global_match(clouds[k], placed)]
+        best = (None, 0.0, "no plausible match")
+        for init in inits:
+            T, fitness, _ = multiscale_icp(clouds[k], placed, init)
+            if bounded:
+                m, deg = pose_change(last_seen, T)
+                if m > limit[0] or deg > limit[1]:
+                    continue
+            need = NEAR_MIN_FITNESS if bounded else PLACE_MIN_FITNESS
+            if fitness >= need and fitness > best[1]:
+                best = (T, fitness, "near last seen pose" if bounded else "global match")
+        T, fitness, note = best
+        world.append(T)
+        results.append((fitness, note))
+        if T is not None:
+            placed += o3d.geometry.PointCloud(clouds[k]).transform(T)
+            placed = placed.voxel_down_sample(REG_VOXEL)
+    return world, results
 
 
 def integrate_all(recording, frame_ids, poses, K, depth_scale, depth_max, voxel, block_count, device):

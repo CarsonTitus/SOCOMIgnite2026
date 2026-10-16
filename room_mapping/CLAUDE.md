@@ -42,7 +42,9 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   sRGB → linear COLOR_0, KHR_materials_unlit). Writes the glb itself: Open3D 0.20's glb writer made unreadable files.
   Checked by `test_export_unity.py`. `unity/*.cs`: runtime loader (glTFast) + first/third-person controller (issue #37)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
+- `diagnose.py`: compares recordings (metadata vs frames, timing, usable depth, per-frame tracking) → table + `output/diagnose/*.png`
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
+- `android/`: Pixel recorder app (Kotlin, Gradle); same recording folder format as `capture.py`. Build/install steps in README.
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
 
 ## Workflow
@@ -91,6 +93,43 @@ memory don't follow between machines, so this section is the handoff.
 
 ## Next steps
 1. **Android D455 recorder (in progress, build on the tower):** a separate small app first, not inside PSYOP-VISR.
+   - **2026-10-14 status:** `android/` builds (`./gradlew assembleDebug`, see README) but is **not yet tested on the
+     phone**. Kotlin, plain Views, `FrameWriter.kt` mirrors `rgbd_io.FrameWriter` (3 writer threads, 90-frame queue,
+     own 16-bit PNG encoder since Android's Bitmap is 8-bit only; `Png16Test` + OpenCV round-trip is bit-exact).
+     librealsense has no prebuilt Android AAR: `build_librealsense_aar.sh` builds 2.58.4 from source and patches a
+     typo in its `Option.java` (`;` → `,`). The Java `Intrinsic` has no fx/fy/ppx/ppy getters, so the app reads them
+     by reflection. Toolchain on the tower is user-space under `~/Android` (JDK 17, SDK, NDK 28, Gradle 8.11.1).
+     **Tested on the Pixel 2026-10-14: works.** First phone recording (tower copy: 008) 61 s, 1842 frames, 29.96 fps,
+     0 dropped, max frame gap 33.4 ms, 511 MB; reconstructs with `--loop-closure` (end correction 28 cm). Tracking lost
+     247 frames while looking at far/dark space (>4 m) and then re-acquired. Fixed: a double free (Device.close()
+     already closes its sensors). Seen once: first start "Frame didn't arrive within 5000" (no auto-retry yet).
+     adb from the tower goes over the Pixel hotspot (`adb tcpip 5555`); pulling is slow (~4 MB/s, 2 min per minute recorded).
+   - **008 reconstruction is still poor (user, 2026-10-14):** half the room tilted, parts mapped in the wrong place.
+     Cause: tracking lost frames ~900-1150 while facing far/dark space, and poses after re-acquiring are wrong.
+     Tried (copies in `output/008_run*/`): run1 default 247 lost, LC 28 cm/3.5°; run2 `--depth-max 5` **661 lost (worse)**;
+     run3 `--fragment-size 15` 247 lost, 443 loop closures, LC 48 cm/7.2°, still wrong per user.
+     **User's direction for next time:** more range (the D455 is used for rooms bigger than 3 m) and fix the
+     mis-placed parts. Note: simply raising `--depth-max` hurt tracking, so consider separating the two: track
+     with ≤3 m depth but integrate to 5-6 m; and handle tracking loss better (re-localise against the model
+     instead of continuing from the last pose, or split into segments that loop closure registers globally).
+   - **Diagnosis (2026-10-16, `diagnose.py 1 8`):** the phone side is fine (848x480 @ 29.96 fps, 0 dropped, max gap
+     33.4 ms, same intrinsics as the PC; colour/depth offset and IMU are not recorded by either recorder). 008 was moved
+     ~2.4x faster than 001 (0.38 vs 0.16 m/s median). At 33 s the camera turned to far space (in-range share 71% -> 18%):
+     the absolute fitness fell with it although ~0.9 of in-range depth still matched, frames were rejected, the pose
+     went stale, and a false re-lock at frame 1240 (11% matched) tilted half the room. Also, with only a floor/wall in
+     range, frame-to-model tracking slid ~1 m/s sideways (frames ~985-1003) before failing.
+   - **Fixes in `reconstruct.py` / `loop_closure.py` (2026-10-16):** fitness judged relative to in-range depth; frames
+     under `--weak-usable` (30% in 3 m) are neither tracked nor integrated, their pose is bridged by frame-to-frame
+     Hybrid odometry (5 m depth, up to 3 s), and if the model doesn't match when depth returns (new area) building
+     continues from the bridged pose; if a bridge fails, a new segment starts and `place_segments` joins it (motion-gated).
+     Loop-closure edges may only move a fragment 5 cm/2 deg + 1 cm/0.3 deg per second between the fragments (false
+     20-42 cm ICP matches between pieces 2-8 s apart doubled 008's floor/ceiling). `--depth-max` stays 3 m: 5 m
+     shattered the model. Results in `output/008_run*/`: run7 = 0 lost, 44 bridged, LC 26.9 cm/2.75 deg, level walls.
+     001 unchanged. **User: "can tell what things are now but still botched."**
+   - **Next (user, 2026-10-16):** new laptop recordings at the same walking speed as 008, blinds open vs closed, to
+     separate speed from windows. Run `diagnose.py` on them (and on 007 once its recording is on the tower). Phone not
+     available for now (partner using it). Still to do: IMU recording in `capture.py` + app, gravity levelling; live
+     too-fast / low-depth warning in the recorders.
    - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
      (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
      at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and

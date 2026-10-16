@@ -27,6 +27,13 @@ import open3d.core as o3c
 import loop_closure
 from rgbd_io import open_recording, resolve_recording
 
+RELOCK_FRAMES = 15   # after this many untrackable frames in a row (0.5 s) the pose is stale: start a new segment
+MIN_SEGMENT = 30     # segments shorter than this (1 s) are too small to place reliably, so they're dropped
+START_USABLE = 0.3   # a new segment starts on a frame with at least this share of depth in tracking range
+BRIDGE_DEPTH_MAX = 5.0   # bridging odometry may use far depth too: colour keeps it from sliding
+MAX_BRIDGE = 90      # bridge at most this many frames (3 s) with frame-to-frame odometry before giving up on the pose
+BRIDGE_MIN_FITNESS = 0.05  # frame-to-frame odometry matching less than this share of pixels is not trusted (008 dips to 0.095)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -34,10 +41,22 @@ def main():
     ap.add_argument("--out", default="output")
     ap.add_argument("--voxel", type=float, default=0.01, help="TSDF voxel size in metres")
     ap.add_argument("--depth-min", type=float, default=0.3)
-    ap.add_argument("--depth-max", type=float, default=3.0, help="ignore depth beyond this (m); noise grows with distance²")
+    ap.add_argument("--depth-max", type=float, default=3.0,
+                    help="build the model from depth up to this far (m); noise grows with distance²")
+    ap.add_argument("--track-depth-max", type=float, default=3.0,
+                    help="track the camera with depth up to this far (m). Far depth is too noisy to track on: "
+                         "5 m lost 661 frames of 008 vs 247 at 3 m")
     ap.add_argument("--block-count", type=int, default=80000)
-    ap.add_argument("--min-fitness", type=float, default=0.1,
-                    help="skip frames whose tracking fitness is below this")
+    ap.add_argument("--min-fitness", type=float, default=0.4,
+                    help="skip frames where less than this share of the usable (in-range) depth matches the model")
+    ap.add_argument("--weak-usable", type=float, default=0.3,
+                    help="frames with less than this share of pixels in tracking range are not tracked against the "
+                         "model (008: with only a floor in range it slid ~1 m/s sideways) nor integrated; their pose "
+                         "is bridged with frame-to-frame colour+depth odometry")
+    ap.add_argument("--reacquire-fitness", type=float, default=0.6,
+                    help="after a bridge, the model match must cover this share of the usable depth to be trusted")
+    ap.add_argument("--no-bridge", action="store_true",
+                    help="old behaviour: a tracking loss ends the segment (no frame-to-frame bridging)")
     ap.add_argument("--every", type=int, default=1, help="use every Nth frame")
     ap.add_argument("--method", choices=["point2plane", "hybrid"], default="point2plane",
                     help="tracking: depth geometry only, or depth + colour")
@@ -54,15 +73,55 @@ def main():
     intrinsic = o3c.Tensor(K, o3c.float64)
     print(f"Device: {device}   depth {w}x{h}   depth_scale {depth_scale:.1f}   voxel {args.voxel} m")
 
-    T = o3c.Tensor(np.identity(4))
-    model = o3d.t.pipelines.slam.Model(args.voxel, 16, args.block_count, T, device)
     method = {"point2plane": o3d.t.pipelines.odometry.Method.PointToPlane,
               "hybrid": o3d.t.pipelines.odometry.Method.Hybrid}[args.method]
     use_color = args.method == "hybrid"
     frame = o3d.t.pipelines.slam.Frame(h, w, intrinsic, device)
     raycast = o3d.t.pipelines.slam.Frame(h, w, intrinsic, device)
 
-    poses, frame_ids, used, lost, t0 = [], [], 0, 0, time.time()
+    # Tracking runs in segments: after a real loss the stored pose is stale, and tracking from it either never
+    # recovers or locks on in the wrong place. So a loss that can't be bridged ends the segment, a new one starts
+    # from scratch, and place_segments() joins them afterwards by registering their geometry.
+    #
+    # Bridging (008, frames ~970-1050): turning toward far space leaves too little depth in range to track against
+    # the model, and when enough comes back the camera is looking at a part of the room the model doesn't have yet,
+    # so it can't re-acquire either. Frame-to-frame odometry with colour and far depth carries the pose across, and
+    # if the model still doesn't match when depth returns, the frame is integrated at the bridged pose (new ground).
+    segments = []          # each: {"ids": frame numbers, "poses": camera poses in the segment's own frame, "cloud"}
+    model, seg, miss, bridging, prev = None, None, 0, 0, None
+    used, lost, bridged, reseeds, t0 = 0, 0, 0, 0, time.time()
+    odo = o3d.t.pipelines.odometry
+    criteria = [odo.OdometryConvergenceCriteria(20), odo.OdometryConvergenceCriteria(10),
+                odo.OdometryConvergenceCriteria(5)]
+
+    def close_segment():
+        nonlocal model, seg, lost, bridging
+        if seg and len(seg["ids"]) >= MIN_SEGMENT:
+            pcd = model.extract_pointcloud().cpu()
+            loop_closure.fix_colors(pcd.point)
+            cloud = pcd.to_legacy().voxel_down_sample(loop_closure.REG_VOXEL)
+            # join segments on the accurate near geometry only: with --depth-max 5 the far, noisy surfaces made
+            # 008's segments fail to match. Keep points within tracking range of some camera position.
+            pts = np.asarray(cloud.points)
+            cams = np.array(seg["poses"])[::10, :3, 3]
+            near = np.zeros(len(pts), bool)
+            for c in cams:
+                near |= np.einsum("ij,ij->i", pts - c, pts - c) <= args.track_depth_max ** 2
+            seg["cloud"] = cloud.select_by_index(np.flatnonzero(near))
+            segments.append(seg)
+        elif seg:
+            lost += len(seg["ids"])  # too short to place reliably
+        model, seg, bridging = None, None, 0
+
+    def bridge_step(cur):
+        """Camera motion from the previous frame to this one by colour + depth odometry, or None if unreliable."""
+        try:
+            res = odo.rgbd_odometry_multi_scale(cur, prev, intrinsic, o3c.Tensor(np.identity(4)), depth_scale,
+                                                max(args.depth_max, BRIDGE_DEPTH_MAX), criteria, odo.Method.Hybrid)
+        except RuntimeError:
+            return None
+        return res.transformation if res.fitness >= BRIDGE_MIN_FITNESS else None
+
     for i, (depth, color) in enumerate(frames):
         if i % args.every:
             continue
@@ -71,41 +130,112 @@ def main():
             depth = np.where(depth > 0, smoothed, 0).astype(np.uint16)  # keep no-data pixels as no-data
         depth_img = o3d.t.geometry.Image(o3c.Tensor(depth)).to(device)
         color_img = o3d.t.geometry.Image(o3c.Tensor(color)).to(device)
+        cur = None if args.no_bridge else o3d.t.geometry.RGBDImage(color_img.to(o3c.float32, scale=1 / 255), depth_img)
         if use_color:  # hybrid tracking needs float colour, and integration then needs float depth too
             depth_img, color_img = depth_img.to(o3c.float32), color_img.to(o3c.float32, scale=1 / 255)
         frame.set_data_from_image("depth", depth_img)
         frame.set_data_from_image("color", color_img)
 
-        if used > 0:
-            try:
-                res = model.track_frame_to_model(frame, raycast, depth_scale, args.depth_max,
-                                                 args.depth_diff, method)
-            except RuntimeError:
+        # Open3D's fitness is matched pixels / all pixels, so it can't exceed the in-range share: looking into
+        # a far room (008: ~20% in range) it fell under an absolute 0.1 while tracking was still fine, and after
+        # that a wrong match at 0.10 (11% of a 96%-in-range frame) "re-locked" and tilted half the room.
+        # Good tracking matches 0.55-1.0 of the usable pixels (median 0.94), so judge it relative to that.
+        usable = np.count_nonzero((depth >= args.depth_min * depth_scale) &
+                                  (depth <= args.track_depth_max * depth_scale)) / depth.size
+        if seg is None:
+            if usable < START_USABLE:
                 lost += 1
+                prev = cur
                 continue
-            if res.fitness < args.min_fitness:
-                lost += 1
-                continue
-            T = T @ res.transformation
+            T = o3c.Tensor(np.identity(4))
+            model = o3d.t.pipelines.slam.Model(args.voxel, 16, args.block_count, T, device)
+            seg = {"ids": [], "poses": []}
+        else:
+            ok = usable >= args.weak_usable
+            if ok:
+                if bridging:  # the raycast is from the last integrated pose: redo it from the bridged one
+                    model.update_frame_pose(len(seg["ids"]), T)
+                    model.synthesize_model_frame(raycast, depth_scale, args.depth_min, args.track_depth_max, 8.0,
+                                                 use_color)
+                try:
+                    res = model.track_frame_to_model(frame, raycast, depth_scale, args.track_depth_max,
+                                                     args.depth_diff, method)
+                    ok = res.fitness / usable >= (args.reacquire_fitness if bridging else args.min_fitness)
+                except RuntimeError:
+                    ok = False
+            if ok:
+                T = T @ res.transformation
+            else:
+                step = bridge_step(cur) if cur is not None and prev is not None else None
+                if step is not None and bridging < MAX_BRIDGE:
+                    T = T @ step
+                    prev = cur
+                    if bridging and usable >= START_USABLE:
+                        reseeds += 1   # enough depth again but the model doesn't cover it: new ground, build on
+                    else:
+                        bridging += 1
+                        bridged += 1
+                        continue
+                else:
+                    lost += 1
+                    miss += 1
+                    prev = cur
+                    if args.no_bridge and miss < RELOCK_FRAMES:
+                        continue
+                    close_segment()
+                    continue
+        miss, bridging, prev = 0, 0, cur
 
-        model.update_frame_pose(used, T)
+        model.update_frame_pose(len(seg["ids"]), T)
         model.integrate(frame, depth_scale, args.depth_max)
-        model.synthesize_model_frame(raycast, depth_scale, args.depth_min, args.depth_max, 8.0, use_color)
-        poses.append(T.cpu().numpy())
-        frame_ids.append(i)
+        model.synthesize_model_frame(raycast, depth_scale, args.depth_min, args.track_depth_max, 8.0, use_color)
+        seg["poses"].append(T.cpu().numpy())
+        seg["ids"].append(i)
         used += 1
         if used % 100 == 0:
-            print(f"  frame {i:5d}  integrated {used}  lost {lost}  {used / (time.time() - t0):.1f} fps")
+            print(f"  frame {i:5d}  integrated {used}  bridged {bridged}  lost {lost}  segments {len(segments) + 1}  "
+                  f"{used / (time.time() - t0):.1f} fps")
+    only_model = model if not segments else None  # one unbroken segment: reuse its model, no rebuild needed
+    close_segment()
+    if not segments:
+        raise SystemExit("Tracking never held for a full second: nothing to build.")
 
-    print(f"Integrated {used} frames, skipped {lost} (tracking lost) in {time.time() - t0:.0f} s")
-    poses = np.array(poses)
+    if len(segments) > 1:
+        print(f"Tracking was lost {len(segments) - 1}x: joining {len(segments)} segments "
+              f"(frames {', '.join(f"{s['ids'][0]}-{s['ids'][-1]}" for s in segments)})")
+        gaps = [0] + [b["ids"][0] - a["ids"][-1] - 1 for a, b in zip(segments, segments[1:])]
+        world, results = loop_closure.place_segments([s["cloud"] for s in segments],
+                                                     [s["poses"][-1] for s in segments], gaps)
+        for k, (Wk, (f, note)) in enumerate(zip(world, results)):
+            if k:
+                print(f"  segment {k + 1} (after {gaps[k]} lost frames): "
+                      f"{f'placed, {note}, overlap {f:.2f}' if Wk is not None else 'NOT placed, left out: ' + note}")
+        for s, Wk in zip(segments, world):
+            s["world"] = Wk
+        dropped = [s for s in segments if s["world"] is None]
+        lost += sum(len(s["ids"]) for s in dropped)
+        segments = [s for s in segments if s["world"] is not None]
+    else:
+        segments[0]["world"] = np.identity(4)
+    frame_ids = [i for s in segments for i in s["ids"]]
+    poses = np.array([s["world"] @ p for s in segments for p in s["poses"]])
+    order = np.argsort(frame_ids)
+    frame_ids, poses = [frame_ids[k] for k in order], poses[order]
+
+    print(f"Integrated {len(frame_ids)} frames, bridged {bridged} (pose only), skipped {lost} (tracking lost), "
+          f"built on from a bridged pose {reseeds}x, in {time.time() - t0:.0f} s")
     print_path_stats(poses)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     name = Path(args.recording).stem
-    pcd = model.extract_pointcloud().to(o3c.Device("CPU:0"))
-    mesh = model.extract_trianglemesh().to(o3c.Device("CPU:0"))
+    if only_model is not None:
+        pcd = only_model.extract_pointcloud().to(o3c.Device("CPU:0"))
+        mesh = only_model.extract_trianglemesh().to(o3c.Device("CPU:0"))
+        del only_model
+    else:
+        pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, poses, K, depth_scale, args.depth_max,
+                                               args.voxel, args.block_count, device)
     write_cloud(out / f"{name}_cloud.ply", pcd)
     o3d.t.io.write_triangle_mesh(str(out / f"{name}_mesh.ply"), mesh)
     np.save(out / f"{name}_poses.npy", poses)
@@ -116,7 +246,7 @@ def main():
         del model  # free GPU memory before rebuilding
         t1 = time.time()
         print(f"\nLoop closure: fragments of {args.fragment_size} frames...")
-        lc_poses, st = loop_closure.optimize_poses(args.recording, frame_ids, poses, K, depth_scale, args.depth_max,
+        lc_poses, st = loop_closure.optimize_poses(args.recording, frame_ids, poses, K, depth_scale, args.track_depth_max,
                                                    args.voxel, args.fragment_size, device)
         print(f"  {st['fragments']} fragments, {st['pairs_checked']} pairs registered, "
               f"{st['loops_found']} loop closures found, {st['loops_kept']} kept after optimisation")
