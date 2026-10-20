@@ -1,6 +1,6 @@
 # Even G2 Direction Tracker
 
-A prototype for visualizing G2 head turns from the Even Hub IMU stream. It shows relative turning and an optional cardinal heading estimate, with a pulsing radar whose sample contacts rotate as you turn.
+A prototype for visualizing G2 head turns from the Even Hub IMU stream. It shows relative turning and an optional cardinal heading estimate, with a pulsing radar that can stay fixed north or rotate with your heading.
 
 ## Run locally
 

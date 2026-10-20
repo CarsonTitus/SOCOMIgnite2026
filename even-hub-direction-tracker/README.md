@@ -25,7 +25,7 @@ npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173
 4. Turn your head and observe the relative left/right estimate. Change the axis if the sign/direction does not match your movement.
 5. For cardinal output, enable the phone compass while holding the phone in the same forward direction as the glasses, or select the manual forward bearing. Zero while facing that direction, then make one known 90° right turn and press **Calibrate +90°** (or double-tap the glasses). Cardinal output combines that anchor with the relative G2 turn estimate.
 
-On glasses, a single tap starts the forward zeroing capture. After a known 90° right turn, double-tap or long-press to calibrate the cardinal scale; a pair of single-tap events is also detected as a double-tap.
+On glasses, a single tap starts forward zeroing, a double-tap calibrates the cardinal scale, and a long-press switches between **Fixed North** (default) and **User-Centered North**. Fixed North keeps the map and cardinal labels steady while your heading changes. User-Centered North rotates the map and cardinal labels with your turn so your current heading stays at the top. A pair of single-tap events is also detected as a double-tap.
 
 ## Sensor limits
 

@@ -54,13 +54,13 @@ The command starts Vite and opens the SDK simulator at `http://localhost:5173/?d
 - `y`: screen-down position; negative is up/north when facing north.
 - Coordinates near `-1..1` place a point within the radar range.
 
-`radarTurnRadians()` derives the wearer-relative rotation from the integrated yaw. It uses the calibrated degrees-per-unit value after calibration and a visual 45°-per-unit default before calibration. Both radar renderers rotate the sample positions by this turn so contacts move across the display as the wearer turns. The default is for visual responsiveness only; use the known 90° calibration for a meaningful cardinal scale.
+`radarOrientation` starts as `fixed-north`. In this mode, contacts and cardinal labels stay fixed while the heading readout changes. A glasses long-press toggles `user-centered`; in that mode, `radarTurnRadians()` rotates contacts and all cardinal labels together so the wearer's current heading remains at the top. The transform uses calibrated degrees-per-unit when available and a visual 45°-per-unit estimate before calibration; the estimate is only for preview responsiveness. Calibrate with a known 90° turn for meaningful direction output.
 
 `renderDashboardRadar()` draws the rings and pulsing points into the dashboard canvas on animation frames. `renderRadarFrame()` draws the same points into an offscreen 288 × 144 canvas, converts it to grayscale bytes, and sends it to image container 1 through `bridge.updateImageRawData()` every 100 ms. `renderGlasses()` updates the adjacent text container with heading and relative-turn values.
 
 ## Connecting real contact data later
 
-The IMU stream and contact feed are separate inputs. G2 IMU reports move the contact map relative to the wearer; they do not provide teammate positions. Replace the static `sampleContacts` source in `src/main.ts` with a small adapter that receives your future feed, validates it, and converts its positions into the normalized radar coordinates above. Keep network or Bluetooth pipeline code out of `renderDashboardRadar()` and `renderRadarFrame()`; those functions should draw the latest contact snapshot only.
+The IMU stream and contact feed are separate inputs. G2 IMU reports control the map rotation in User-Centered North; they do not provide teammate positions. Replace the static `sampleContacts` source in `src/main.ts` with a small adapter that receives your future feed, validates it, and converts its positions into the normalized radar coordinates above. Fixed North expects positions in a stable north/east map frame. Keep network or Bluetooth pipeline code out of `renderDashboardRadar()` and `renderRadarFrame()`; those functions should draw the latest contact snapshot only.
 
 A future adapter should define and document its coordinate reference, range, update cadence, stale-contact behavior, and source IDs. If the feed provides world coordinates, convert them into the radar's east/north reference before publishing the snapshot; if it provides positions relative to the wearer, do not rotate them a second time.
 

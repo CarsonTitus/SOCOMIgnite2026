@@ -25,6 +25,7 @@ const meters = { x: $('meter-x'), y: $('meter-y'), z: $('meter-z') };
 const calibrationDot = $('calibration-dot');
 const calibrationLabel = $('calibration-label');
 const sampleAge = $('sample-age');
+const radarModeLabel = $('radar-mode');
 const yawAxisSelect = $('yaw-axis') as HTMLSelectElement;
 const zAxisNote = $('z-axis-note');
 const phoneCompassStatus = $('phone-compass-status');
@@ -56,6 +57,8 @@ let lastHudText = '';
 let hudUpdateTimer = 0;
 let pendingGlassesTap = 0;
 let bridgeStatusMessage: string | undefined;
+type RadarOrientation = 'fixed-north' | 'user-centered';
+let radarOrientation: RadarOrientation = 'fixed-north';
 const demoMode = new URLSearchParams(location.search).get('demo') === '1';
 let demoImuTimer = 0;
 const radarCanvas = document.createElement('canvas');
@@ -82,6 +85,13 @@ function handleGlassesTap() {
     pendingGlassesTap = 0;
     void zeroForward();
   }, 320);
+}
+
+function toggleRadarOrientation() {
+  radarOrientation = radarOrientation === 'fixed-north' ? 'user-centered' : 'fixed-north';
+  radarModeLabel.textContent = radarOrientation === 'fixed-north' ? 'FIXED NORTH' : 'USER-CENTERED NORTH';
+  renderGlasses();
+  renderRadarFrame();
 }
 
 function renderDirection() {
@@ -116,8 +126,16 @@ function renderDirection() {
 }
 
 function radarTurnRadians(): number {
+  if (radarOrientation === 'fixed-north') return 0;
   const displayDegreesPerUnit = degreesPerYawUnit ?? 45;
   return (yawEstimate * displayDegreesPerUnit * Math.PI) / 180;
+}
+
+function radarPoint(east: number, north: number, turnRadians: number) {
+  return {
+    east: east * Math.cos(turnRadians) - north * Math.sin(turnRadians),
+    north: east * Math.sin(turnRadians) + north * Math.cos(turnRadians),
+  };
 }
 
 function renderDashboardRadar(now: number) {
@@ -144,20 +162,21 @@ function renderDashboardRadar(now: number) {
   ctx.stroke();
   ctx.font = '11px "DM Mono", monospace';
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#b4f275';
-  ctx.fillText('N', cx, 17);
-  ctx.fillStyle = '#84958a';
-  ctx.fillText('S', cx, size - 7);
-  ctx.fillText('W', 11, cy + 4);
-  ctx.fillText('E', size - 11, cy + 4);
   const turnRadians = radarTurnRadians();
+  for (const cardinal of [
+    { name: 'N', east: 0, north: 1 },
+    { name: 'E', east: 1, north: 0 },
+    { name: 'S', east: 0, north: -1 },
+    { name: 'W', east: -1, north: 0 },
+  ]) {
+    const point = radarPoint(cardinal.east, cardinal.north, turnRadians);
+    ctx.fillStyle = cardinal.name === 'N' ? '#b4f275' : '#84958a';
+    ctx.fillText(cardinal.name, cx + point.east * (radius - 8), cy - point.north * (radius - 8) + 4);
+  }
   for (const contact of sampleContacts) {
-    const east = contact.x;
-    const north = -contact.y;
-    const relativeEast = east * Math.cos(turnRadians) - north * Math.sin(turnRadians);
-    const relativeNorth = east * Math.sin(turnRadians) + north * Math.cos(turnRadians);
-    const x = cx + relativeEast * radius;
-    const y = cy - relativeNorth * radius;
+    const point = radarPoint(contact.x, -contact.y, turnRadians);
+    const x = cx + point.east * radius;
+    const y = cy - point.north * radius;
     const pulse = 0.7 + 0.3 * Math.sin(now / 240 + Number(contact.id));
     ctx.fillStyle = `rgba(190,255,135,${pulse * 0.16})`;
     ctx.beginPath();
@@ -179,7 +198,8 @@ function renderGlasses() {
     ? `${bearingName(normalizeBearing(forwardBearing + yawEstimate * degreesPerYawUnit))}  ${Math.round(normalizeBearing(forwardBearing + yawEstimate * degreesPerYawUnit))}°`
     : 'WAITING FOR IMU';
   const relative = gyroBias === undefined ? '—' : `${score > 0 ? '+' : ''}${score.toFixed(2)}`;
-  const content = `RADAR  ·  DEMO\n\nHEADING\n${heading}\n\nRELATIVE TURN\n${relative}`;
+  const orientation = radarOrientation === 'fixed-north' ? 'FIXED N' : 'HEAD UP';
+  const content = `RADAR · ${orientation}\n\nHEADING\n${heading}\n\nRELATIVE TURN\n${relative}`;
   if (content === lastHudText) return;
   lastHudText = content;
   void bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2, content }));
@@ -211,12 +231,9 @@ function renderRadarFrame() {
   ctx.lineTo(cx, cy + radius);
   ctx.stroke();
   for (const contact of sampleContacts) {
-    const east = contact.x;
-    const north = -contact.y;
-    const relativeEast = east * Math.cos(turnRadians) - north * Math.sin(turnRadians);
-    const relativeNorth = east * Math.sin(turnRadians) + north * Math.cos(turnRadians);
-    const x = cx + relativeEast * radius;
-    const y = cy - relativeNorth * radius;
+    const point = radarPoint(contact.x, -contact.y, turnRadians);
+    const x = cx + point.east * radius;
+    const y = cy - point.north * radius;
     const pulse = 0.75 + 0.25 * Math.sin(now / 260 + Number(contact.id));
     ctx.fillStyle = `rgba(255,255,255,${pulse})`;
     ctx.beginPath();
@@ -226,7 +243,8 @@ function renderRadarFrame() {
   ctx.fillStyle = '#bcbcbc';
   ctx.font = '7px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('N', cx, cy - radius - 3);
+  const northMarker = radarPoint(0, 1, turnRadians);
+  ctx.fillText('N', cx + northMarker.east * (radius + 4), cy - northMarker.north * (radius + 3));
   const rgba = ctx.getImageData(0, 0, width, height).data;
   const grayscale = new Array<number>(width * height);
   for (let pixel = 0; pixel < grayscale.length; pixel += 1) {
@@ -390,7 +408,9 @@ async function start() {
         return;
       }
       if (system.eventType === OsEventTypeList.LONG_PRESS_EVENT) {
-        calibrateCardinalScale();
+        window.clearTimeout(pendingGlassesTap);
+        pendingGlassesTap = 0;
+        toggleRadarOrientation();
         return;
       }
       if (system.eventType !== OsEventTypeList.IMU_DATA_REPORT || !system.imuData) return;
