@@ -20,7 +20,7 @@ npm run demo
 
 The tester is showing the app's glasses layout while the dashboard feeds sample head turns into the radar.
 
-![Direction tracker running in the Even Hub virtual glasses simulator](even-hub-direction-tracker/simulator-demo.png)
+![Virtual G2 display showing the radar, heading, and relative turn](even-hub-direction-tracker/simulator-demo.png)
 
 ### Dashboard
 
