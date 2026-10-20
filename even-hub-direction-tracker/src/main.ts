@@ -400,24 +400,25 @@ async function start() {
     bridge = await waitForEvenAppBridge();
     unsubscribe = bridge.onEvenHubEvent((event) => {
       const system = event.sysEvent;
-      if (!system) return;
-      if (system.eventType === OsEventTypeList.CLICK_EVENT) {
+      const eventType = event.textEvent?.eventType ?? system?.eventType ??
+        (event.textEvent || system ? OsEventTypeList.CLICK_EVENT : undefined);
+      if (eventType === OsEventTypeList.CLICK_EVENT) {
         handleGlassesTap();
         return;
       }
-      if (system.eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
         window.clearTimeout(pendingGlassesTap);
         pendingGlassesTap = 0;
         calibrateCardinalScale();
         return;
       }
-      if (system.eventType === OsEventTypeList.LONG_PRESS_EVENT) {
+      if (eventType === OsEventTypeList.LONG_PRESS_EVENT) {
         window.clearTimeout(pendingGlassesTap);
         pendingGlassesTap = 0;
         toggleRadarOrientation();
         return;
       }
-      if (system.eventType !== OsEventTypeList.IMU_DATA_REPORT || !system.imuData) return;
+      if (system?.eventType !== OsEventTypeList.IMU_DATA_REPORT || !system.imuData) return;
       const { x, y, z } = system.imuData;
       if ([x, y, z].some((value) => typeof value !== 'number' || !Number.isFinite(value))) return;
       handleSample(x!, y!, z!);
@@ -425,17 +426,26 @@ async function start() {
 
     try {
       const created = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer({
-        containerTotalNum: 2,
+        containerTotalNum: 3,
         imageObject: [new ImageContainerProperty({
           xPosition: 0, yPosition: 72, width: 288, height: 144,
-          containerID: 1, containerName: 'direction-radar', zOrderIndex: 0,
+          containerID: 1, containerName: 'direction-radar', zOrderIndex: 1,
         })],
-        textObject: [new TextContainerProperty({
-          xPosition: 300, yPosition: 68, width: 270, height: 160,
-          containerID: 2, containerName: 'radar-status', zOrderIndex: 1,
-          content: 'RADAR  ·  DEMO\n\nHEADING\nWAITING FOR IMU\n\nRELATIVE TURN\n—',
-          isEventCapture: 1,
-        })],
+        textObject: [
+          new TextContainerProperty({
+            xPosition: 0, yPosition: 0, width: 576, height: 288,
+            borderWidth: 0, borderColor: 0, paddingLength: 0,
+            containerID: 3, containerName: 'input-layer', zOrderIndex: 0,
+            content: ' ', isEventCapture: 1,
+          }),
+          new TextContainerProperty({
+            xPosition: 300, yPosition: 68, width: 270, height: 220,
+            borderWidth: 0, borderColor: 0, borderRadius: 0, paddingLength: 0,
+            containerID: 2, containerName: 'radar-status', zOrderIndex: 2,
+            content: 'RADAR  ·  DEMO\n\nHEADING\nWAITING FOR IMU\n\nRELATIVE TURN\n—',
+            isEventCapture: 0,
+          }),
+        ],
       }));
       if (created !== 0) throw new Error(`Could not create glasses display (result ${created}).`);
     } catch (error) {
