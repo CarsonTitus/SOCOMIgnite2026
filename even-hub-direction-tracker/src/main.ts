@@ -155,6 +155,14 @@ function renderDashboardRadar(now: number) {
     ctx.stroke();
   }
   const turnRadians = radarTurnRadians();
+  const eastAxis = radarPoint(1, 0, turnRadians);
+  const northAxis = radarPoint(0, 1, turnRadians);
+  ctx.beginPath();
+  ctx.moveTo(cx - eastAxis.east * radius, cy + eastAxis.north * radius);
+  ctx.lineTo(cx + eastAxis.east * radius, cy - eastAxis.north * radius);
+  ctx.moveTo(cx - northAxis.east * radius, cy + northAxis.north * radius);
+  ctx.lineTo(cx + northAxis.east * radius, cy - northAxis.north * radius);
+  ctx.stroke();
   ctx.font = '11px "DM Mono", monospace';
   ctx.textAlign = 'center';
   for (const cardinal of [
@@ -215,10 +223,18 @@ function renderRadarFrame() {
   ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = '#525252';
   ctx.lineWidth = 1;
+  for (const scale of [1, 0.66, 0.33]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * scale, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  const eastAxis = radarPoint(1, 0, turnRadians);
+  const northAxis = radarPoint(0, 1, turnRadians);
   ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.arc(cx, cy, radius * 0.66, 0, Math.PI * 2);
-  ctx.arc(cx, cy, radius * 0.33, 0, Math.PI * 2);
+  ctx.moveTo(cx - eastAxis.east * radius, cy + eastAxis.north * radius);
+  ctx.lineTo(cx + eastAxis.east * radius, cy - eastAxis.north * radius);
+  ctx.moveTo(cx - northAxis.east * radius, cy + northAxis.north * radius);
+  ctx.lineTo(cx + northAxis.east * radius, cy - northAxis.north * radius);
   ctx.stroke();
   for (const contact of sampleContacts) {
     const point = radarPoint(contact.x, -contact.y, turnRadians);
