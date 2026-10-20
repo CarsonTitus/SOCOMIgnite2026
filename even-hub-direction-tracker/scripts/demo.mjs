@@ -1,0 +1,55 @@
+import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const binSuffix = process.platform === 'win32' ? '.cmd' : '';
+const vite = resolve(root, 'node_modules', '.bin', `vite${binSuffix}`);
+const simulator = resolve(root, 'node_modules', '.bin', `evenhub-simulator${binSuffix}`);
+const url = 'http://localhost:5173/?demo=1';
+
+const server = spawn(vite, ['--host', '0.0.0.0', '--strictPort'], { cwd: root, stdio: 'inherit' });
+let tester;
+let stopping = false;
+
+function stop(code = 0) {
+  if (stopping) return;
+  stopping = true;
+  tester?.kill('SIGTERM');
+  server.kill('SIGTERM');
+  process.exitCode = code;
+}
+
+process.on('SIGINT', () => stop());
+process.on('SIGTERM', () => stop());
+server.on('error', (error) => {
+  console.error(`Could not start Vite: ${error.message}`);
+  stop(1);
+});
+server.on('exit', (code) => {
+  if (!stopping && code !== 0) stop(code ?? 1);
+});
+
+for (let attempt = 0; attempt < 80 && !stopping; attempt += 1) {
+  try {
+    const response = await fetch(url);
+    if (response.ok) break;
+  } catch {
+    // Vite is still starting.
+  }
+  if (attempt === 79) {
+    console.error('Vite did not become ready on port 5173.');
+    stop(1);
+  }
+  await delay(250);
+}
+
+if (stopping) process.exit();
+console.log(`Opening the tester with sample IMU data: ${url}`);
+tester = spawn(simulator, [url], { cwd: root, stdio: 'inherit' });
+tester.on('error', (error) => {
+  console.error(`Could not start the Even Hub tester: ${error.message}`);
+  stop(1);
+});
+tester.on('exit', (code) => stop(code ?? 0));

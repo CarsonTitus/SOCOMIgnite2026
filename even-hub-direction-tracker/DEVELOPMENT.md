@@ -27,14 +27,14 @@ The dashboard radar and the glasses radar use the same sample contact positions 
 
 ## Getting a local preview
 
-From this directory:
+From this directory, run the all-in-one demo:
 
 ```bash
 npm install
-npm run dev
+npm run demo
 ```
 
-Open the Vite address in a browser to view the companion dashboard. Add `?demo=1` to use generated IMU samples without calling the device IMU API. For the SDK simulator, run `npm run simulator` in another terminal. Real-device testing uses Even Realities Prototype Mode and the QR URL printed by `npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173`.
+The command starts Vite and opens the SDK simulator at `http://localhost:5173/?demo=1`. The dashboard and virtual glasses display use generated IMU samples without calling the device IMU API. Real-device testing uses `npm run dev`, Even Realities Prototype Mode, and the QR URL printed by `npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173`.
 
 `npm run build` runs TypeScript checking and creates the Vite build. The simulator is useful for layout iteration, but its current bridge does not emulate `imuControl`; `?demo=1` bypasses that call and drives the same sample handler with synthetic values. It does not prove that the phone app receives live G2 samples.
 
