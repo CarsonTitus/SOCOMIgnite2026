@@ -8,10 +8,10 @@ Requires Node.js 20.19+ (or 22.12+), npm, the Even Realities phone app 2.2.10+, 
 
 ```bash
 npm install
-npm run dev
+npm run demo
 ```
 
-To preview the glasses display with the included tester simulator, start the development server and then run `npm run simulator` in another terminal. This host needs the system package `libwebkit2gtk-4.1-0` and its dependencies. To test on real glasses, use the `evenhub qr` command with the development server's LAN address, then scan the QR in Prototype Mode in the Even Realities app.
+This single command starts Vite and the tester simulator with generated IMU samples. The dashboard opens at `http://localhost:5173/?demo=1`. The tester needs the system package `libwebkit2gtk-4.1-0` and its dependencies. To test on real glasses, start only the development server with `npm run dev`, then use the `evenhub qr` command with the server's LAN address and scan the QR in Prototype Mode in the Even Realities app.
 
 ```bash
 npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173

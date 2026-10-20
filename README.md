@@ -1,179 +1,42 @@
-# PSYOP-VISR
+# Even G2 Direction Tracker
 
-Tactical HUD application for the EVEN Realities G2 smart glasses, running on a Pixel 9 Pro XL. Streams live camera, compass, and audio data from the phone to the G2 display via a custom BLE protocol — no Even Realities companion app required.
+A prototype for visualizing G2 head turns from the Even Hub IMU stream. It shows relative turning and an optional cardinal heading estimate, with a pulsing radar whose sample contacts rotate as you turn.
 
----
+## Run locally
 
-## Hardware Requirements
-
-- **Phone:** Google Pixel 9 Pro XL (Android 14+)
-- **Glasses:** EVEN Realities G2
-- **Connection:** Native BLE — the phone drives the G2 directly
-
----
-
-## Development Requirements
-
-| Tool | Version |
-|------|---------|
-| Android Studio | Hedgehog (2023.1.1) or newer |
-| Android SDK | API 34 |
-| Kotlin | 1.9.0 |
-| Gradle | 8.2.0 |
-| ADB | Any recent version |
-
----
-
-## Project Setup
-
-### 1. Clone the repo
+Requires Node.js 20.19+ (or 22.12+) and npm.
 
 ```bash
-git clone <repo-url>
-cd evenSOCOM
+cd even-hub-direction-tracker
+npm install
+npm run demo
 ```
 
-### 2. Open in Android Studio
+This single command starts the development server and Even Hub tester with generated IMU samples. The dashboard is available at `http://localhost:5173/?demo=1`; Linux requires `libwebkit2gtk-4.1-0` for the tester.
 
-File → Open → select the `evenSOCOM` directory. Let Gradle sync complete.
+### Virtual glasses display
 
-### 3. Add model assets
+The tester is showing the app's glasses layout while the dashboard feeds sample head turns into the radar.
 
-The following model files must be placed in `app/src/main/assets/` before building. They are not committed to the repo due to size.
+![Direction tracker running in the Even Hub virtual glasses simulator](even-hub-direction-tracker/simulator-demo.png)
 
-| File | Purpose | Source |
-|------|---------|--------|
-| `efficientdet.tflite` | Object / symbol detection | [MediaPipe Model Card](https://developers.google.com/mediapipe/solutions/vision/object_detector) |
-| `face_detection_short_range.tflite` | Face detection | [MediaPipe Model Card](https://developers.google.com/mediapipe/solutions/vision/face_detector) |
-| `facenet.tflite` | Face identity embedding | TFLite model hub / custom trained |
-| `faces_db.json` | Known-face database | Hand-curated JSON, schema below |
-| `ggml-tiny.bin` | Whisper speech-to-text weights | [whisper.cpp releases](https://github.com/ggerganov/whisper.cpp) |
-| `libwhisper.so` | Whisper native library (arm64) | Built from [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
+### Dashboard
 
-`faces_db.json` schema:
-```json
-[
-  { "name": "CALLSIGN", "embedding": [0.123, -0.456, ...] }
-]
-```
+![Direction tracker dashboard with sample radar contacts and heading](even-hub-direction-tracker/radar-demo-preview.png)
 
-> Only `efficientdet.tflite` is required for basic object/symbol detection. All other assets gate their respective scan modes — missing files produce a `MODEL NOT FOUND` result on the HUD rather than crashing.
+## Try on G2 glasses
 
-### 4. Pair the G2
-
-Pair the G2 glasses to the Pixel via Android Bluetooth settings before first run. The app connects using the device name `EVEN G2` — no pairing code is needed after the initial system pair.
-
-### 5. Disable the Even Realities companion app
-
-The Even companion app (`com.even.sg`) will steal the BLE HUD session if it is running.
+Use an Even Hub developer-enabled account and the Even Realities phone app. Start the dev server on a network reachable by the phone, then create and scan a prototype QR code:
 
 ```bash
-adb shell pm disable-user --user 0 com.even.sg
+npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173
 ```
 
-To re-enable it later:
+In the tracker, inspect the raw X/Y/Z values while turning your head, select the axis that responds to yaw, face forward, and press **Zero / Set Forward**. For cardinal output, provide a forward bearing and calibrate with a known 90° right turn. The G2 IMU alone cannot determine north; the cardinal estimate needs a compass or manual anchor and may drift.
 
-```bash
-adb shell pm enable com.even.sg
-```
+## Project guides
 
----
+- [Tracker setup and sensor notes](even-hub-direction-tracker/README.md)
+- [Code flow, calibration, radar, and future data integration](even-hub-direction-tracker/DEVELOPMENT.md)
 
-## Building
-
-### Debug build (recommended for development)
-
-```bash
-./gradlew assembleDebug
-```
-
-Output: `app/build/outputs/apk/debug/app-debug.apk`
-
-### Install directly to device
-
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-### Build + install in one step
-
-```bash
-./gradlew installDebug
-```
-
----
-
-## Running
-
-### Launch via ADB
-
-```bash
-adb shell am start -n com.evensocom.psyopvisr/.MainActivity
-```
-
-### Required permissions
-
-The app will prompt for these on first launch:
-
-- **Camera** — live feed for all vision scan modes
-- **Bluetooth / Bluetooth Connect / Bluetooth Scan** — G2 BLE link
-- **Microphone** — live audio for Whisper transcription
-- **Location (coarse)** — required by Android for BLE scanning
-
-Grant all permissions, then restart the service if the G2 does not connect automatically.
-
-### Logcat (development)
-
-```bash
-adb logcat -s PSYOP-VISR VisionModeController TouchpadRouter
-```
-
----
-
-## G2 Touchpad Controls
-
-| Gesture | Action |
-|---------|--------|
-| Tap | Wake from IDLE → open scan menu / confirm selection |
-| Swipe forward | Next menu item |
-| Swipe backward | Previous menu item |
-| Long press | Cancel / return to IDLE |
-
----
-
-## Scan Modes
-
-| Mode | Model required | Description |
-|------|---------------|-------------|
-| FACE SCAN | `face_detection_short_range.tflite`, `facenet.tflite`, `faces_db.json` | Detect, classify, and identify faces with distance and position |
-| SYMBOL SCAN | `efficientdet.tflite` | Detect objects and annotate with tactical/cultural context |
-| CULTURAL CTX | `efficientdet.tflite` | Same as symbol scan, context-focused output |
-| ROOM ANALYSIS | ARCore (system) | Depth-map room and summarize spatial layout |
-
----
-
-## HUD Layout
-
-```
-HDG: 247° NW   BAT: 92%
-────────────────────────
-> FACE SCAN
-  SYMBOL SCAN
-  CULTURAL CTX
-  ROOM ANALYSIS
-```
-
----
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for a full component diagram.
-
----
-
-## Known Issues / Roadmap
-
-- `face_detection_short_range.tflite`, `facenet.tflite`, and `ggml-tiny.bin` are not yet bundled — those scan modes return `MODEL NOT FOUND`
-- Room analysis requires ARCore depth API; full integration pending
-- Whisper native library (`libwhisper.so`) not yet linked — transcription falls back to ML Kit
-- Double-tap gesture mapping unconfirmed on hardware (may arrive as two single taps)
+Sample radar contacts and `?demo=1` IMU values are for development. The contact feed can later be replaced at the `sampleContacts` source described in the development guide.
