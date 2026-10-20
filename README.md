@@ -6,13 +6,15 @@ A prototype for visualizing G2 head turns from the Even Hub IMU stream. It shows
 
 Requires Node.js 20.19+ (or 22.12+) and npm.
 
+From the repository root, run:
+
 ```bash
 cd even-hub-direction-tracker
 npm install
 npm run demo
 ```
 
-This single command starts the development server and Even Hub tester with generated IMU samples. The dashboard is available at `http://localhost:5173/?demo=1`; Linux requires `libwebkit2gtk-4.1-0` for the tester.
+`npm run demo` starts the development server and opens the Even Hub tester with generated IMU samples. The dashboard is at [http://localhost:5173/?demo=1](http://localhost:5173/?demo=1). Press **Ctrl+C** in the terminal to stop both. On Linux, install `libwebkit2gtk-4.1-0` to run the tester.
 
 ### Virtual glasses display
 
@@ -29,6 +31,9 @@ The tester is showing the app's glasses layout while the dashboard feeds sample 
 Use an Even Hub developer-enabled account and the Even Realities phone app. Start the dev server on a network reachable by the phone, then create and scan a prototype QR code:
 
 ```bash
+cd even-hub-direction-tracker
+npm run dev
+# In another terminal, from even-hub-direction-tracker:
 npx evenhub qr --url http://YOUR_COMPUTER_LAN_IP:5173
 ```
 
