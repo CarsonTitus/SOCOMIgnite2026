@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#080d0b" />
+    <title>Even G2 · Direction Tracker</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Direction Tracker home">
+          <span class="brand-mark">E</span>
+          <span>FIELDNOTES <b>/ G2</b></span>
+        </a>
+        <div class="connection"><i id="connection-dot"></i><span id="connection-label">CONNECTING TO EVEN HUB</span></div>
+      </header>
+
+      <section class="hero">
+        <div class="eyebrow"><span class="pulse"></span> HEAD ORIENTATION · LIVE</div>
+        <h1>Know where<br />you’re looking.</h1>
+        <p class="intro">A glance-direction instrument for your Even G2. Calibrate forward, then watch your head turn relative to that point.</p>
+      </section>
+
+      <section class="instrument" aria-label="Direction instrument">
+        <div class="instrument-top"><span id="sample-age">WAITING FOR IMU</span></div>
+        <div class="instrument-body">
+          <div class="radar-wrap"><canvas id="dashboard-radar" width="520" height="520" aria-label="Radar with three sample contacts"></canvas></div>
+          <div class="readout">
+            <div class="direction-label" id="direction-label">WAITING FOR GLASSES</div>
+            <div class="relative-reading"><strong id="angle-value">---</strong><span>RELATIVE TURN</span></div>
+            <div class="direction-hint" id="direction-hint">Open this app in Even Realities to start the IMU stream.</div>
+            <div class="cardinal-reading"><span>CARDINAL ESTIMATE</span><strong id="cardinal-value">NEEDS CALIBRATION</strong></div>
+            <div class="calibration-controls"><label for="yaw-axis">TURN AXIS</label><select id="yaw-axis"><option value="z">Z</option><option value="x">X</option><option value="y">Y</option></select><button class="calibrate" id="calibrate" disabled><span>◎</span> ZERO / SET FORWARD</button></div>
+            <div class="compass-controls">
+              <div class="compass-line"><span id="phone-compass-status">PHONE COMPASS · OFF</span><button class="small-action" id="enable-compass">ENABLE</button></div>
+              <div class="compass-line"><label for="forward-bearing">FORWARD BEARING</label><select id="forward-bearing"><option>N</option><option>NE</option><option>E</option><option>SE</option><option>S</option><option>SW</option><option>W</option><option>NW</option></select></div>
+              <button class="small-action calibrate-scale" id="calibrate-turn" disabled>TURN RIGHT 90° · CALIBRATE SCALE</button>
+            </div>
+            <div class="calibration-state"><i id="calibration-dot"></i><span id="calibration-label">FORWARD NOT SET</span></div>
+          </div>
+        </div>
+        <div class="instrument-bottom"><span>RELATIVE ONLY <b>·</b> NOT A COMPASS BEARING</span><span id="update-rate">IMU · 5 Hz</span></div>
+      </section>
+
+      <section class="details">
+        <div class="axis-card">
+          <div class="section-heading"><span>IMU TELEMETRY</span><span class="live-badge"><i></i> STREAMING</span></div>
+          <div class="axis-grid">
+            <div class="axis"><span class="axis-name">X <small>RAW</small></span><strong id="axis-x">—</strong><div class="meter"><i id="meter-x"></i></div></div>
+            <div class="axis"><span class="axis-name">Y <small>RAW</small></span><strong id="axis-y">—</strong><div class="meter"><i id="meter-y"></i></div></div>
+            <div class="axis"><span class="axis-name">Z <small id="z-axis-note">RAW</small></span><strong id="axis-z">—</strong><div class="meter"><i id="meter-z"></i></div></div>
+          </div>
+        </div>
+        <aside class="note-card"><span class="note-icon">↗</span><div><b>Relative, by design</b><p>The SDK streams raw X/Y/Z IMU values without documented units or axis mapping. The selected axis is integrated as a relative turn estimate; it needs on-device calibration and cannot provide true north.</p></div></aside>
+      </section>
+
+      <footer><span>EVEN HUB SDK <b>0.0.16</b></span><span>BUILT FOR THE MOMENT BETWEEN LOOKS</span></footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
