@@ -201,7 +201,7 @@ function renderGlasses() {
     : 'WAITING FOR IMU';
   const relative = gyroBias === undefined ? '—' : `${score > 0 ? '+' : ''}${score.toFixed(2)}`;
   const orientation = radarOrientation === 'fixed-north' ? 'FIXED N' : 'HEAD UP';
-  const content = `RADAR · ${orientation}\n\nHEADING\n${heading}\n\nRELATIVE TURN\n${relative}`;
+  const content = `RADAR · ${orientation}\nHEADING  ${heading}\nREL TURN  ${relative}`;
   if (content === lastHudText) return;
   lastHudText = content;
   void bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2, content }));
