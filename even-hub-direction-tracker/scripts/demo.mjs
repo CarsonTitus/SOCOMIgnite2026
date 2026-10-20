@@ -9,15 +9,35 @@ const vite = resolve(root, 'node_modules', '.bin', `vite${binSuffix}`);
 const simulator = resolve(root, 'node_modules', '.bin', `evenhub-simulator${binSuffix}`);
 const url = 'http://localhost:5173/?demo=1';
 
-const server = spawn(vite, ['--host', '0.0.0.0', '--strictPort'], { cwd: root, stdio: 'inherit' });
+const spawnOptions = {
+  cwd: root,
+  stdio: 'inherit',
+  // Keep each tool and its native descendants in a process group so stopping
+  // the demo also closes the simulator window instead of leaving stale UI up.
+  detached: process.platform !== 'win32',
+};
+const server = spawn(vite, ['--host', '0.0.0.0', '--strictPort'], spawnOptions);
 let tester;
 let stopping = false;
+
+function stopProcessTree(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32') {
+    child.kill('SIGTERM');
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGTERM');
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+}
 
 function stop(code = 0) {
   if (stopping) return;
   stopping = true;
-  tester?.kill('SIGTERM');
-  server.kill('SIGTERM');
+  stopProcessTree(tester);
+  stopProcessTree(server);
   process.exitCode = code;
 }
 
@@ -47,7 +67,7 @@ for (let attempt = 0; attempt < 80 && !stopping; attempt += 1) {
 
 if (stopping) process.exit();
 console.log(`Opening the tester with sample IMU data: ${url}`);
-tester = spawn(simulator, [url], { cwd: root, stdio: 'inherit' });
+tester = spawn(simulator, [url], spawnOptions);
 tester.on('error', (error) => {
   console.error(`Could not start the Even Hub tester: ${error.message}`);
   stop(1);
