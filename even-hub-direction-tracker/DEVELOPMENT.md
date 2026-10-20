@@ -54,7 +54,7 @@ The command starts Vite and opens the SDK simulator at `http://localhost:5173/?d
 - `y`: screen-down position; negative is up/north when facing north.
 - Coordinates near `-1..1` place a point within the radar range.
 
-`radarOrientation` starts as `fixed-north`. In this mode, contacts and cardinal labels stay fixed while the heading readout changes. A glasses long-press toggles `user-centered`; in that mode, `radarTurnRadians()` rotates contacts and all cardinal labels together so the wearer's current heading remains at the top. The transform uses calibrated degrees-per-unit when available and a visual 45°-per-unit estimate before calibration; the estimate is only for preview responsiveness. Calibrate with a known 90° turn for meaningful direction output.
+`radarOrientation` starts as `fixed-north`. In this mode, contacts, cardinal labels, and the north/east grid stay fixed while the heading readout changes. A glasses long-press toggles `user-centered`; in that mode, `radarTurnRadians()` rotates contacts, cardinal labels, and the directional grid together so the wearer's current heading remains at the top. The transform uses calibrated degrees-per-unit when available and a visual 45°-per-unit estimate before calibration; the estimate is only for preview responsiveness. Calibrate with a known 90° turn for meaningful direction output.
 
 `renderDashboardRadar()` draws the rings and pulsing points into the dashboard canvas on animation frames. `renderRadarFrame()` draws the same points into an offscreen 288 × 144 canvas, converts it to grayscale bytes, and sends it to image container 1 through `bridge.updateImageRawData()` every 100 ms. `renderGlasses()` updates the adjacent text container with heading and relative-turn values.
 
