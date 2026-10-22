@@ -103,7 +103,8 @@ memory don't follow between machines, so this section is the handoff.
      **Tested on the Pixel 2026-10-14: works.** First phone recording (tower copy: 008) 61 s, 1842 frames, 29.96 fps,
      0 dropped, max frame gap 33.4 ms, 511 MB; reconstructs with `--loop-closure` (end correction 28 cm). Tracking lost
      247 frames while looking at far/dark space (>4 m) and then re-acquired. Fixed: a double free (Device.close()
-     already closes its sensors). Seen once: first start "Frame didn't arrive within 5000" (no auto-retry yet).
+     already closes its sensors). The app refuses to start unless the camera reports a USB 3 link
+     (`USB_TYPE_DESCRIPTOR`); on USB 2 librealsense only said "Couldn't resolve requests" (2026-10-22). Seen once: first start "Frame didn't arrive within 5000" (no auto-retry yet).
      adb from the tower goes over the Pixel hotspot (`adb tcpip 5555`); pulling is slow (~4 MB/s, 2 min per minute recorded).
    - **008 reconstruction is still poor (user, 2026-10-14):** half the room tilted, parts mapped in the wrong place.
      Cause: tracking lost frames ~900-1150 while facing far/dark space, and poses after re-acquiring are wrong.

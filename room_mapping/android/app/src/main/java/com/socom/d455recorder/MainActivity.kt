@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.intel.realsense.librealsense.Align
+import com.intel.realsense.librealsense.CameraInfo
 import com.intel.realsense.librealsense.Config
 import com.intel.realsense.librealsense.DepthSensor
 import com.intel.realsense.librealsense.Device
@@ -118,9 +119,26 @@ class MainActivity : AppCompatActivity() {
             setStatus("Connect the D455 (USB 3 cable)")
             return
         }
+        // On USB 2 the D455 can't stream 848x480 depth + colour at 30 fps (librealsense only says "Couldn't
+        // resolve requests"), so refuse to start until it's on a USB 3 link
+        val usb = usbType()
+        if (usb?.startsWith("3") != true) {
+            Log.w(TAG, "D455 USB link: $usb")
+            setStatus("D455 is on USB ${usb ?: "?"}: use a USB 3.2 cable, then replug")
+            return
+        }
         running = true
         cameraThread = thread(name = "d455") { cameraLoop() }
     }
+
+    /** The camera's USB link as librealsense reports it ("3.2", "2.1", ...), or null if it can't be read. */
+    private fun usbType(): String? = runCatching {
+        rsContext?.queryDevices()?.use { list ->
+            list.createDevice(0).use { dev ->
+                if (dev.supportsInfo(CameraInfo.USB_TYPE_DESCRIPTOR)) dev.getInfo(CameraInfo.USB_TYPE_DESCRIPTOR) else null
+            }
+        }
+    }.getOrNull()
 
     private fun stopCamera() {
         running = false
