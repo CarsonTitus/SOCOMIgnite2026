@@ -30,7 +30,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `reconstruct.py`: recording (.db3/.bag) → room model using Open3D tensor dense SLAM (CUDA if available).
   Writes `output/<name>_cloud.ply`, `_mesh.ply`, `_poses.npy`. Run: `.venv/bin/python reconstruct.py <recording>`
 - `output/`: reconstruction results
-- `capture.py`: live preview (SPACE = start/stop, Q = quit) → `recordings/NNN_YYYYMMDD_HHMMSS/` (e.g. 001_20260923_095336) folder with depth PNG and colour JPEG
+- `capture.py`: live preview (SPACE = start/stop, Q = quit) → `recordings/NNN_YYYYMMDD_HHMMSS/` (e.g. 001_20260923_095336) folder with depth PNG, colour JPEG and `imu.csv` (gyro/accel)
   at 848×480 depth / 640×480 colour @ 30 fps, about 6.5 MB/s. `--seconds N` records headless.
 - `convert.py`: realsense-viewer .db3/.bag → compressed recording folder (about 14× smaller, same reconstruction)
 - `play.py`: play back a recording as colour | depth video
@@ -43,6 +43,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
   Checked by `test_export_unity.py`. `unity/*.cs`: runtime loader (glTFast) + first/third-person controller (issue #37)
 - `loop_closure.py`: fragment pose-graph loop closure used by `reconstruct.py --loop-closure` (writes `*_lc_*` outputs)
 - `diagnose.py`: compares recordings (metadata vs frames, timing, usable depth, per-frame tracking) → table + `output/diagnose/*.png`
+- `compare.py`: scores a model against a reference model of the same room (align, then share of surface within 3/5/10 cm)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `android/`: Pixel recorder app (Kotlin, Gradle); same recording folder format as `capture.py`. Build/install steps in README.
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
@@ -126,10 +127,26 @@ memory don't follow between machines, so this section is the handoff.
      20-42 cm ICP matches between pieces 2-8 s apart doubled 008's floor/ceiling). `--depth-max` stays 3 m: 5 m
      shattered the model. Results in `output/008_run*/`: run7 = 0 lost, 44 bridged, LC 26.9 cm/2.75 deg, level walls.
      001 unchanged. **User: "can tell what things are now but still botched."**
-   - **Next (user, 2026-10-16):** new laptop recordings at the same walking speed as 008, blinds open vs closed, to
-     separate speed from windows. Run `diagnose.py` on them (and on 007 once its recording is on the tower). Phone not
-     available for now (partner using it). Still to do: IMU recording in `capture.py` + app, gravity levelling; live
-     too-fast / low-depth warning in the recorders.
+   - **Laptop test (2026-10-16): windows are the cause.** 009 (blinds open, 65 far/window frames) broke at 39 s like
+     008; 010 (blinds closed, turned faster than 008, 50 dropped frames) never broke and is clean: use **010 as the
+     reference room** (same room as 008/009). Score a build against it by aligning and measuring the share of its
+     surface within 3/5/10 cm of 010's lc mesh (`compare.py`). Per-frame scoring showed 009's
+     bridge over a 37-frame window drifted 1.06 m / 33 deg, so everything after was wrong.
+   - **Re-anchoring (2026-10-16):** when depth returns after a bridge and the model doesn't match, a new segment starts
+     with the bridged pose as prior (kept through short dropped segments and broken bridges), and `place_segments`
+     registers it (prior, last-seen and global candidates; ICP from 16x REG_VOXEL; within PRIOR_LIMIT of the prior;
+     with IMU, tilt vs gravity < 5 deg). RANSAC is seeded so builds are reproducible. Scores vs 010 (3 cm / 10 cm):
+     008 30/47% -> 41/73%; 009 22/40% -> 27-35/51-68% (its 3rd segment overlaps only ~15%, so its placement is
+     fragile); 010 unchanged. Old builds in `output/00[89]_before_reanchor/`.
+   - **IMU (2026-10-16, untested on hardware):** `capture.py` records `imu.csv` (gyro/accel, IMU axes) + `meta["imu"]`
+     (rates, rotation to depth axes); `rgbd_io.read_imu` returns them in depth axes. `reconstruct.py` uses the gyro's
+     rotation in bridging (init, override when the odometry disagrees > 2 deg/frame, gyro-only when odometry fails),
+     gravity to gate segment joins, saves `_up.npy`, and prints an "IMU check". Tested only with IMU simulated from
+     009's path (mechanics OK: gyro vs tracking 0.03 deg/frame). With the gyro the bridge's rotation is better but its
+     translation still drifts (~44 cm over 28 frames). **Next:** a blinds-open laptop recording like 009 with the IMU
+     (check `imu.csv` exists, the "IMU check" line, then score vs 010); window-glass masking / plane fill (Mirror3D
+     idea, arXiv 2106.06629: fit the plane from the depth around the glass) not started; app IMU recording; live
+     low-depth / too-fast warning in the recorders. Phone not available for now (partner using it).
    - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
      (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
      at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and

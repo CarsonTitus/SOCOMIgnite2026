@@ -12,10 +12,12 @@ Usage:
 
     python reconstruct.py 1 --loop-closure                    # also correct drift (slower, see loop_closure.py)
 
-Writes <out>/<name>_cloud.ply, <name>_mesh.ply and <name>_poses.npy (camera trajectory).
+Writes <out>/<name>_cloud.ply, <name>_mesh.ply and <name>_poses.npy (camera trajectory), plus _frames.npy (frame number
+of each pose), _track.npy (per-frame tracking state) and, with an IMU, _up.npy (measured up direction).
 With --loop-closure, also writes <name>_lc_cloud.ply, <name>_lc_mesh.ply and <name>_lc_poses.npy.
 """
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -25,14 +27,45 @@ import open3d as o3d
 import open3d.core as o3c
 
 import loop_closure
-from rgbd_io import open_recording, resolve_recording
+from rgbd_io import open_recording, read_imu, resolve_recording
 
 RELOCK_FRAMES = 15   # after this many untrackable frames in a row (0.5 s) the pose is stale: start a new segment
 MIN_SEGMENT = 30     # segments shorter than this (1 s) are too small to place reliably, so they're dropped
 START_USABLE = 0.3   # a new segment starts on a frame with at least this share of depth in tracking range
+TRACK_STATES = ("tracked", "bridged", "new segment after bridge", "lost")   # codes 0-3 in <name>_track.npy
 BRIDGE_DEPTH_MAX = 5.0   # bridging odometry may use far depth too: colour keeps it from sliding
+BRIDGE_METHOD = "Hybrid"
+IMU_MAX_DISAGREE = 2.0   # deg per frame: a bridge step turning differently from the gyro takes the gyro's rotation
+IMU_WINDOW_MS = 150      # accelerometer samples within this of a frame are averaged for its gravity direction
 MAX_BRIDGE = 90      # bridge at most this many frames (3 s) with frame-to-frame odometry before giving up on the pose
 BRIDGE_MIN_FITNESS = 0.05  # frame-to-frame odometry matching less than this share of pixels is not trusted (008 dips to 0.095)
+
+
+def so3_exp(w):
+    """Rotation matrix for rotation vector w (rad)."""
+    th = np.linalg.norm(w)
+    if th < 1e-12:
+        return np.identity(3)
+    k = w / th
+    Kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.identity(3) + np.sin(th) * Kx + (1 - np.cos(th)) * Kx @ Kx
+
+
+def gyro_rotation(gyro, t0, t1):
+    """Camera rotation from time t0 to t1 (ms) from gyro rows (t_ms, wx, wy, wz) in camera axes: the orientation at
+    t1 expressed in the camera frame at t0 (the same convention as odometry's relative pose)."""
+    t = gyro[:, 0]
+    a, b = np.searchsorted(t, t0, side="right"), np.searchsorted(t, t1, side="left")
+    edges = np.concatenate([[t0], t[a:b], [t1]])
+    rates = gyro[np.minimum(np.arange(a, b + 1), len(t) - 1), 1:]  # each sub-interval uses the sample ending it
+    R = np.identity(3)
+    for dt, w in zip(np.diff(edges) / 1000.0, rates):
+        R = R @ so3_exp(w * dt)
+    return R
+
+
+def angle_deg(R):
+    return np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
 
 
 def main():
@@ -57,6 +90,7 @@ def main():
                     help="after a bridge, the model match must cover this share of the usable depth to be trusted")
     ap.add_argument("--no-bridge", action="store_true",
                     help="old behaviour: a tracking loss ends the segment (no frame-to-frame bridging)")
+    ap.add_argument("--no-imu", action="store_true", help="ignore the recording's gyro/accelerometer (imu.csv)")
     ap.add_argument("--every", type=int, default=1, help="use every Nth frame")
     ap.add_argument("--method", choices=["point2plane", "hybrid"], default="point2plane",
                     help="tracking: depth geometry only, or depth + colour")
@@ -67,11 +101,39 @@ def main():
     ap.add_argument("--fragment-size", type=int, default=30, help="frames per loop-closure fragment (smaller = more drift corrected, slower)")
     args = ap.parse_args()
 
+    o3d.utility.random.seed(0)  # segment joining uses RANSAC: same recording + settings -> same model
     device = o3c.Device("CUDA:0" if o3c.cuda.is_available() else "CPU:0")
     args.recording = resolve_recording(args.recording)
     frames, K, (h, w), depth_scale = open_recording(args.recording)
     intrinsic = o3c.Tensor(K, o3c.float64)
     print(f"Device: {device}   depth {w}x{h}   depth_scale {depth_scale:.1f}   voxel {args.voxel} m")
+    # IMU (if recorded): the gyro carries rotation across bridges (it doesn't care what the camera sees), and the
+    # accelerometer's gravity keeps segments from being joined tilted
+    imu = None if args.no_imu or not Path(args.recording).is_dir() else read_imu(args.recording)
+    if imu is not None:
+        gyro, accel, _ = imu
+        stamps = np.array(json.load(open(Path(args.recording) / "meta.json"))["timestamps_ms"])
+        print(f"IMU: {len(gyro)} gyro, {len(accel)} accel samples")
+    else:
+        gyro = accel = stamps = None
+
+    def up_at(i):
+        """Measured 'up' (opposite gravity) in camera axes at frame i, or None."""
+        if accel is None or not len(accel):
+            return None
+        near = np.abs(accel[:, 0] - stamps[i]) <= IMU_WINDOW_MS
+        if not near.any():
+            return None
+        a = accel[near, 1:].mean(axis=0)
+        return a / np.linalg.norm(a)
+
+    def mean_up(ids, poses):
+        """Average measured 'up' over frames, in the frame the poses are given in, or None without an IMU."""
+        ups = [P[:3, :3] @ u for f, P in zip(ids, poses) if (u := up_at(f)) is not None]
+        if not ups:
+            return None
+        u = np.sum(ups, axis=0)
+        return u / np.linalg.norm(u)
 
     method = {"point2plane": o3d.t.pipelines.odometry.Method.PointToPlane,
               "hybrid": o3d.t.pipelines.odometry.Method.Hybrid}[args.method]
@@ -85,18 +147,26 @@ def main():
     #
     # Bridging (008, frames ~970-1050): turning toward far space leaves too little depth in range to track against
     # the model, and when enough comes back the camera is looking at a part of the room the model doesn't have yet,
-    # so it can't re-acquire either. Frame-to-frame odometry with colour and far depth carries the pose across, and
-    # if the model still doesn't match when depth returns, the frame is integrated at the bridged pose (new ground).
+    # so it can't re-acquire either. Frame-to-frame odometry with colour and far depth carries the pose across. If
+    # the model still doesn't match when depth returns, the bridge has drifted or the view is new ground: a new
+    # segment starts there, with the bridged pose as its prior, and place_segments() registers it against the
+    # geometry so far (on 009 a 37-frame window bridge drifted so far that everything after it was misplaced).
     segments = []          # each: {"ids": frame numbers, "poses": camera poses in the segment's own frame, "cloud"}
-    model, seg, miss, bridging, prev = None, None, 0, 0, None
+    model, seg, miss, bridging, prev, prev_i = None, None, 0, 0, None, None
+    gyro_only = 0
     used, lost, bridged, reseeds, t0 = 0, 0, 0, 0, time.time()
+    track_log = []         # per frame: (frame, state, usable share, matched share of usable); states in TRACK_STATES
     odo = o3d.t.pipelines.odometry
     criteria = [odo.OdometryConvergenceCriteria(20), odo.OdometryConvergenceCriteria(10),
                 odo.OdometryConvergenceCriteria(5)]
 
+    pending = None         # (bridged pose in the last kept segment's frame, frame number) when a bridge broke
+
     def close_segment():
-        nonlocal model, seg, lost, bridging
-        if seg and len(seg["ids"]) >= MIN_SEGMENT:
+        """Ends the current segment. Returns True if it was kept (long enough to place)."""
+        nonlocal model, seg, lost, bridging, pending
+        kept = bool(seg) and len(seg["ids"]) >= MIN_SEGMENT
+        if kept:
             pcd = model.extract_pointcloud().cpu()
             loop_closure.fix_colors(pcd.point)
             cloud = pcd.to_legacy().voxel_down_sample(loop_closure.REG_VOXEL)
@@ -111,16 +181,46 @@ def main():
             segments.append(seg)
         elif seg:
             lost += len(seg["ids"])  # too short to place reliably
+            if seg["prior"] is not None:  # keep the guess going through it, relative to the last kept segment
+                pending = (seg["prior"] @ T.cpu().numpy(), seg["prior_frame"])
         model, seg, bridging = None, None, 0
+        return kept
 
-    def bridge_step(cur):
-        """Camera motion from the previous frame to this one by colour + depth odometry, or None if unreliable."""
+
+    def new_segment(i, prior=None):
+        """prior: (pose, frame) guess for this segment's start in the previous segment's frame, from bridging."""
+        nonlocal model, seg, T, pending
+        if prior is None and pending is not None:
+            prior = pending      # a bridge broke before this segment could start: its last pose is still a guess
+        pending = None
+        T = o3c.Tensor(np.identity(4))
+        model = o3d.t.pipelines.slam.Model(args.voxel, 16, args.block_count, T, device)
+        seg = {"ids": [], "poses": [], "prior": None if prior is None else prior[0],
+               "prior_frame": None if prior is None else prior[1], "prior_gap": 0 if prior is None else i - prior[1]}
+
+    def bridge_step(cur, i):
+        """Camera motion from the previous frame to this one, or None if unreliable: colour + depth odometry, and
+        with an IMU the gyro's rotation (as the starting guess, as the answer when the odometry disagrees, and on
+        its own, with no translation, when the odometry fails)."""
+        nonlocal gyro_only
+        init = np.identity(4)
+        R_g = gyro_rotation(gyro, stamps[prev_i], stamps[i]) if gyro is not None and len(gyro) else None
+        if R_g is not None:
+            init[:3, :3] = R_g
         try:
-            res = odo.rgbd_odometry_multi_scale(cur, prev, intrinsic, o3c.Tensor(np.identity(4)), depth_scale,
-                                                max(args.depth_max, BRIDGE_DEPTH_MAX), criteria, odo.Method.Hybrid)
+            res = odo.rgbd_odometry_multi_scale(cur, prev, intrinsic, o3c.Tensor(init), depth_scale,
+                                                BRIDGE_DEPTH_MAX, criteria, getattr(odo.Method, BRIDGE_METHOD))
+            step = res.transformation.cpu().numpy() if res.fitness >= BRIDGE_MIN_FITNESS else None
         except RuntimeError:
-            return None
-        return res.transformation if res.fitness >= BRIDGE_MIN_FITNESS else None
+            step = None
+        if R_g is None:
+            return None if step is None else o3c.Tensor(step)
+        if step is None:
+            step = np.identity(4)
+            gyro_only += 1
+        if angle_deg(step[:3, :3].T @ R_g) > IMU_MAX_DISAGREE:
+            step[:3, :3] = R_g
+        return o3c.Tensor(step)
 
     for i, (depth, color) in enumerate(frames):
         if i % args.every:
@@ -142,14 +242,14 @@ def main():
         # Good tracking matches 0.55-1.0 of the usable pixels (median 0.94), so judge it relative to that.
         usable = np.count_nonzero((depth >= args.depth_min * depth_scale) &
                                   (depth <= args.track_depth_max * depth_scale)) / depth.size
+        rel = np.nan
         if seg is None:
             if usable < START_USABLE:
                 lost += 1
-                prev = cur
+                prev, prev_i = cur, i
+                track_log.append((i, 3, usable, rel))
                 continue
-            T = o3c.Tensor(np.identity(4))
-            model = o3d.t.pipelines.slam.Model(args.voxel, 16, args.block_count, T, device)
-            seg = {"ids": [], "poses": []}
+            new_segment(i)
         else:
             ok = usable >= args.weak_usable
             if ok:
@@ -160,31 +260,42 @@ def main():
                 try:
                     res = model.track_frame_to_model(frame, raycast, depth_scale, args.track_depth_max,
                                                      args.depth_diff, method)
-                    ok = res.fitness / usable >= (args.reacquire_fitness if bridging else args.min_fitness)
+                    rel = res.fitness / usable
+                    ok = rel >= (args.reacquire_fitness if bridging else args.min_fitness)
                 except RuntimeError:
                     ok = False
             if ok:
                 T = T @ res.transformation
             else:
-                step = bridge_step(cur) if cur is not None and prev is not None else None
+                step = bridge_step(cur, i) if cur is not None and prev is not None else None
                 if step is not None and bridging < MAX_BRIDGE:
                     T = T @ step
-                    prev = cur
+                    prev, prev_i = cur, i
                     if bridging and usable >= START_USABLE:
-                        reseeds += 1   # enough depth again but the model doesn't cover it: new ground, build on
+                        # enough depth again but the model doesn't match it: new segment, bridged pose as prior
+                        reseeds += 1
+                        track_log.append((i, 2, usable, rel))
+                        prior = (T.cpu().numpy(), i)
+                        new_segment(i, prior if close_segment() else None)
                     else:
                         bridging += 1
                         bridged += 1
+                        track_log.append((i, 1, usable, rel))
                         continue
                 else:
                     lost += 1
                     miss += 1
-                    prev = cur
+                    prev, prev_i = cur, i
+                    track_log.append((i, 3, usable, rel))
                     if args.no_bridge and miss < RELOCK_FRAMES:
                         continue
-                    close_segment()
+                    was_bridging = bridging
+                    if close_segment() and was_bridging:
+                        pending = (T.cpu().numpy(), i)
                     continue
-        miss, bridging, prev = 0, 0, cur
+        if not track_log or track_log[-1][0] != i:
+            track_log.append((i, 0, usable, rel))
+        miss, bridging, prev, prev_i = 0, 0, cur, i
 
         model.update_frame_pose(len(seg["ids"]), T)
         model.integrate(frame, depth_scale, args.depth_max)
@@ -205,7 +316,10 @@ def main():
               f"(frames {', '.join(f"{s['ids'][0]}-{s['ids'][-1]}" for s in segments)})")
         gaps = [0] + [b["ids"][0] - a["ids"][-1] - 1 for a, b in zip(segments, segments[1:])]
         world, results = loop_closure.place_segments([s["cloud"] for s in segments],
-                                                     [s["poses"][-1] for s in segments], gaps)
+                                                     [s["poses"][-1] for s in segments], gaps,
+                                                     [s.get("prior") for s in segments],
+                                                     [s.get("prior_gap", 0) for s in segments],
+                                                     [mean_up(s["ids"], s["poses"]) for s in segments])
         for k, (Wk, (f, note)) in enumerate(zip(world, results)):
             if k:
                 print(f"  segment {k + 1} (after {gaps[k]} lost frames): "
@@ -223,8 +337,19 @@ def main():
     frame_ids, poses = [frame_ids[k] for k in order], poses[order]
 
     print(f"Integrated {len(frame_ids)} frames, bridged {bridged} (pose only), skipped {lost} (tracking lost), "
-          f"built on from a bridged pose {reseeds}x, in {time.time() - t0:.0f} s")
+          f"re-anchored after a bridge {reseeds}x, in {time.time() - t0:.0f} s")
     print_path_stats(poses)
+    if gyro is not None and len(gyro):
+        # sanity check of the IMU's axes and clock against tracking, on consecutive tracked frames
+        diffs, turns = [], []
+        for k in range(1, len(frame_ids)):
+            if frame_ids[k] == frame_ids[k - 1] + 1:
+                R_t = poses[k - 1][:3, :3].T @ poses[k][:3, :3]
+                diffs.append(angle_deg(R_t.T @ gyro_rotation(gyro, stamps[frame_ids[k - 1]], stamps[frame_ids[k]])))
+                turns.append(angle_deg(R_t))
+        print(f"IMU check: gyro vs tracking differ by {np.median(diffs):.2f} deg per frame (median; tracking turns "
+              f"{np.median(turns):.2f}){'  <- check the IMU axes/clock' if np.median(diffs) > 0.5 * np.median(turns) else ''}"
+              f"; bridged on gyro alone {gyro_only}x")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -239,6 +364,11 @@ def main():
     write_cloud(out / f"{name}_cloud.ply", pcd)
     o3d.t.io.write_triangle_mesh(str(out / f"{name}_mesh.ply"), mesh)
     np.save(out / f"{name}_poses.npy", poses)
+    np.save(out / f"{name}_track.npy", np.array(track_log, dtype=float))
+    np.save(out / f"{name}_frames.npy", np.array(frame_ids))  # frame number of each pose in _poses / _lc_poses
+    up = mean_up(frame_ids, poses)
+    if up is not None:
+        np.save(out / f"{name}_up.npy", up)  # measured 'up' in the model's frame (for levelling)
     print(f"Points: {pcd.point.positions.shape[0]:,}   Mesh triangles: {mesh.triangle.indices.shape[0]:,}")
     print(f"Wrote {out}/{name}_cloud.ply, {name}_mesh.ply, {name}_poses.npy")
 

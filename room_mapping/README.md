@@ -52,9 +52,15 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
   `--loop-closure` can take several minutes. Alternatively, copy `recordings/NNN_…` back to the GPU PC and reconstruct there.
 
 **Windows and far space:** frames with under 30% of the image within 3 m (`--weak-usable`) aren't tracked against the
-model or built into it; the camera pose is carried across them by colour + depth frame-to-frame odometry (up to 3 s),
-and building continues from there. `--depth-max` sets the model range (default 3 m; 5 m made 008 noisy and shattered),
-`--track-depth-max` the tracking range (3 m). `--no-bridge` restores the old behaviour (a loss starts a new segment).
+model or built into it; the camera pose is carried across them ("bridged", up to 3 s) by colour + depth frame-to-frame
+odometry and, if the recording has IMU data, the gyro. If the model doesn't match when depth comes back, a new segment
+starts from the bridged pose and is registered against the earlier geometry (`place_segments`; with an IMU, joins that
+would tilt the room are rejected). `--depth-max` sets the model range (default 3 m; 5 m made 008 noisy and
+shattered), `--track-depth-max` the tracking range (3 m). `--no-bridge` / `--no-imu` turn those parts off.
+
+**IMU:** `capture.py` records the D455's gyro + accelerometer to `imu.csv` (in the recording folder; `--no-imu` to skip).
+`reconstruct.py` prints an "IMU check" line comparing the gyro with tracking: it should differ by far less than the
+tracking turn per frame. The Android app doesn't record the IMU yet.
 
 **Scanning tips:** move slowly, stay within about 2.5 m of surfaces, overlap your views, and finish where you started
 (that's what lets loop closure fix drift). **Close the blinds:** looking out bright windows made tracking fail
@@ -118,6 +124,7 @@ $ADB pull /sdcard/Android/data/com.socom.d455recorder/files/recordings/001_20261
 | `reconstruct.py` | Recording → 3D model (Open3D dense RGB-D SLAM, uses CUDA if available) |
 | `loop_closure.py` | Drift correction for `reconstruct.py --loop-closure` (fragment pose graph) |
 | `diagnose.py` | Compare recordings: metadata vs frames, timing, usable depth, tracking quality (+ plot) |
+| `compare.py` | Score a model against a reference model of the same room (share of surface within 3 / 5 / 10 cm) |
 | `view.py` / `play.py` | View a model / play back a recording |
 | `export_unity.py` | Model → levelled, decimated `.glb` for Unity |
 | `unity/*.cs` | Unity scripts: load a scan at runtime, first/third-person walking |

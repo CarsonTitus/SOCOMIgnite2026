@@ -7,7 +7,10 @@ Recording folder layout (Open3D's standard RGB-D dataset format):
         color/000000.jpg ...   colour, aligned to the depth camera (JPEG)
         depth/000000.png ...   16-bit depth in raw units (lossless PNG)
         intrinsic.json         Open3D PinholeCameraIntrinsic (depth camera)
-        meta.json              depth_scale, fps, frame timestamps, dropped-frame count
+        meta.json              depth_scale, fps, frame timestamps, dropped-frame count (+ "imu" info if recorded)
+        imu.csv                optional: t_ms,sensor,x,y,z  (sensor g = gyro rad/s, a = accel m/s^2, in the IMU's
+                               axes; meta["imu"]["to_depth"] rotates them into the depth camera's; same clock as
+                               the frame timestamps)
 """
 import json
 from datetime import datetime
@@ -44,6 +47,7 @@ class FrameWriter:
         self.meta = {"recorded_at": datetime.now().isoformat(timespec="seconds"),
                      "depth_scale": depth_scale, "fps": fps, "timestamps_ms": [], "dropped": 0}
         self.count = 0
+        self._imu, self._imu_lock = [], threading.Lock()
         self._q = queue.Queue(maxsize=300)  # ~10 s of buffer at 30 fps
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -56,6 +60,11 @@ class FrameWriter:
             return
         self.meta["timestamps_ms"].append(timestamp_ms)
         self.count += 1
+
+    def add_imu(self, timestamp_ms, sensor, xyz):
+        """sensor: "g" (gyro) or "a" (accel). Safe to call from librealsense's callback thread."""
+        with self._imu_lock:
+            self._imu.append((timestamp_ms, sensor, xyz[0], xyz[1], xyz[2]))
 
     def _run(self):
         while True:
@@ -75,8 +84,31 @@ class FrameWriter:
     def close(self):
         self._q.put(None)
         self._thread.join()
+        with self._imu_lock:
+            imu = sorted(self._imu)
+        if imu:
+            with open(self.folder / "imu.csv", "w") as f:
+                f.write("t_ms,sensor,x,y,z\n")
+                f.writelines(f"{t:.3f},{k},{x:.6f},{y:.6f},{z:.6f}\n" for t, k, x, y, z in imu)
+            self.meta.setdefault("imu", {})["samples"] = len(imu)
         with open(self.folder / "meta.json", "w") as f:
             json.dump(self.meta, f)
+
+
+def read_imu(folder):
+    """Returns (gyro, accel, R_imu_to_depth) for a recording folder, or None if it has no IMU data. gyro/accel are
+    float arrays of rows (t_ms, x, y, z), in the depth camera's axes (x right, y down, z forward)."""
+    folder = Path(folder)
+    if not (folder / "imu.csv").exists():
+        return None
+    rows = np.genfromtxt(folder / "imu.csv", delimiter=",", skip_header=1, dtype=None, encoding=None)
+    R = np.array(json.load(open(folder / "meta.json")).get("imu", {}).get("to_depth", {}).get("rotation", np.eye(3)))
+    out = []
+    for k in ("g", "a"):
+        a = np.array([(r[0], r[2], r[3], r[4]) for r in rows if r[1] == k], dtype=float).reshape(-1, 4)
+        a[:, 1:] = a[:, 1:] @ R.T
+        out.append(a)
+    return out[0], out[1], R
 
 
 def read_folder(folder):

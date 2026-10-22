@@ -7,6 +7,7 @@ Live D455 preview with start/stop recording to a compressed RGB-D folder
 Usage:
     python capture.py                   # preview window: SPACE = start/stop recording, Q/Esc = quit
     python capture.py --seconds 20      # no window: record 20 s then exit (for testing / headless)
+    python capture.py --no-imu          # don't record the D455's gyro/accelerometer (imu.csv)
 
 Then build the model with:
     python reconstruct.py <number>
@@ -38,7 +39,32 @@ def start_camera():
         sensor.set_option(rs.option.emitter_enabled, 1)  # IR dot pattern helps on blank walls
     intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
     K = np.array([[intr.fx, 0, intr.ppx], [0, intr.fy, intr.ppy], [0, 0, 1]])
-    return pipe, K, 1.0 / sensor.get_depth_scale()
+    return pipe, K, 1.0 / sensor.get_depth_scale(), profile
+
+
+def start_imu(profile, on_sample):
+    """Starts the D455's motion sensor (gyro + accelerometer) with a callback on_sample(t_ms, "g"|"a", xyz).
+    Returns (sensor, info for meta.json), or (None, None) if the camera has no IMU."""
+    motion = next((s for s in profile.get_device().query_sensors() if s.is_motion_sensor()), None)
+    if motion is None:
+        return None, None
+    profiles = [p for p in motion.get_stream_profiles() if p.format() == rs.format.motion_xyz32f]
+    gyro = min((p for p in profiles if p.stream_type() == rs.stream.gyro), key=lambda p: p.fps())
+    accel = min((p for p in profiles if p.stream_type() == rs.stream.accel), key=lambda p: p.fps())
+    ext = gyro.get_extrinsics_to(profile.get_stream(rs.stream.depth))
+    kinds = {rs.stream.gyro: "g", rs.stream.accel: "a"}
+
+    def callback(f):
+        m = f.as_motion_frame().get_motion_data()
+        on_sample(f.get_timestamp(), kinds[f.get_profile().stream_type()], (m.x, m.y, m.z))
+
+    motion.open([gyro, accel])
+    motion.start(callback)
+    info = {"gyro_hz": gyro.fps(), "accel_hz": accel.fps(),
+            # librealsense stores rotation column-major; this is the row-major 3x3 taking IMU axes to depth axes
+            "to_depth": {"rotation": np.array(ext.rotation).reshape(3, 3).T.tolist(),
+                         "translation": list(ext.translation)}}
+    return motion, info
 
 
 def preview_image(depth, color, depth_scale, status, recording):
@@ -63,10 +89,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="recordings")
     ap.add_argument("--seconds", type=float, help="record this long with no window, then exit")
+    ap.add_argument("--no-imu", action="store_true", help="don't record the gyro/accelerometer")
     args = ap.parse_args()
     headless = args.seconds is not None
 
-    pipe, K, depth_scale = start_camera()
+    pipe, K, depth_scale, profile = start_camera()
     align = rs.align(rs.stream.depth)
     print(f"Camera started: depth {DEPTH_W}x{DEPTH_H}, colour {COLOR_W}x{COLOR_H} @ {FPS} fps")
     for _ in range(WARMUP_FRAMES):
@@ -74,10 +101,26 @@ def main():
 
     writer, rec_start, last_fn, cam_dropped = None, 0.0, None, 0
 
+    def on_imu(t_ms, kind, xyz):
+        w = writer   # read once: the main thread may swap it
+        if w is not None:
+            w.add_imu(t_ms, kind, xyz)
+
+    imu, imu_info = None, None
+    if not args.no_imu:
+        try:
+            imu, imu_info = start_imu(profile, on_imu)
+        except RuntimeError as e:  # never lose a recording over the IMU
+            print(f"IMU: could not start ({e}); recording without it")
+    print(f"IMU: gyro {imu_info['gyro_hz']} Hz, accel {imu_info['accel_hz']} Hz" if imu else "IMU: not recording")
+
     def start_recording():
         nonlocal writer, rec_start, last_fn, cam_dropped
         folder = next_recording_folder(args.out)
-        writer = FrameWriter(folder, K, (DEPTH_H, DEPTH_W), depth_scale, FPS)
+        w = FrameWriter(folder, K, (DEPTH_H, DEPTH_W), depth_scale, FPS)
+        if imu_info:
+            w.meta["imu"] = dict(imu_info)
+        writer = w
         rec_start, last_fn, cam_dropped = time.time(), None, 0
         print(f"REC: Recording to {folder}")
 
@@ -137,6 +180,9 @@ def main():
     finally:
         if writer:
             stop_recording()
+        if imu:
+            imu.stop()
+            imu.close()
         pipe.stop()
         cv2.destroyAllWindows()
 

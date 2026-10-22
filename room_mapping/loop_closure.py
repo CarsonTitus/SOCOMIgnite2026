@@ -88,10 +88,11 @@ def build_fragments(recording, frame_ids, poses, K, depth_scale, depth_max, voxe
     return clouds, starts
 
 
-def multiscale_icp(src, tgt, init):
-    """Coarse-to-fine colored ICP. Returns (transformation, fitness, information matrix)."""
+def multiscale_icp(src, tgt, init, coarsest=4):
+    """Coarse-to-fine colored ICP from REG_VOXEL * coarsest down to REG_VOXEL. Returns (transformation, fitness,
+    information matrix)."""
     T, fitness = init, 0.0
-    for v in (REG_VOXEL * 4, REG_VOXEL * 2, REG_VOXEL):
+    for v in [REG_VOXEL * 2 ** k for k in range(int(np.log2(coarsest)), -1, -1)]:
         s, t = src.voxel_down_sample(v), tgt.voxel_down_sample(v)
         for p in (s, t):
             p.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=v * 2, max_nn=30))
@@ -99,7 +100,10 @@ def multiscale_icp(src, tgt, init):
         try:
             r = reg.registration_colored_icp(s, t, v * 1.5, T, reg.TransformationEstimationForColoredICP(), crit)
         except RuntimeError:  # too few correspondences for colored ICP
-            r = reg.registration_icp(s, t, v * 1.5, T, reg.TransformationEstimationPointToPlane(), crit)
+            try:
+                r = reg.registration_icp(s, t, v * 1.5, T, reg.TransformationEstimationPointToPlane(), crit)
+            except RuntimeError:  # too few for any ICP (e.g. a fragment that saw almost nothing): no match
+                return init, 0.0, np.identity(6)
         T, fitness = r.transformation, r.fitness
     info = reg.get_information_matrix_from_point_clouds(s, t, REG_VOXEL * 1.5, T)
     return T, fitness, info
@@ -181,6 +185,8 @@ NEAR_MIN_FITNESS = 0.1    # ...or from near where the camera was last seen (a ne
 MAX_SPEED_M = 0.05        # handheld motion limits per frame (1.5 m/s, 120 deg/s at 30 fps), plus a margin below:
 MAX_TURN_DEG = 4.0        # a placement needing faster motion across the gap is a false match. On 008 the global
 MOTION_MARGIN = (0.3, 20.0)  # match put the room's mirror image 166 deg round after a 0.5 s gap.
+GRAVITY_MAX_DEG = 5.0     # placements must keep the accelerometer's 'up' within this of the first segment's
+PRIOR_LIMIT = (1.0, 45.0)  # a segment started from a bridged pose may land this far (m, deg) from it: bridges drift
 
 
 def global_match(src, tgt):
@@ -200,30 +206,46 @@ def global_match(src, tgt):
     return r.transformation
 
 
-def place_segments(clouds, last_poses, gaps):
+def place_segments(clouds, last_poses, gaps, priors=None, prior_gaps=None, ups=None):
     """Joins separately tracked segments into one world frame. clouds[k] is segment k in its own frame (its first
-    camera pose = identity), last_poses[k] its last camera pose in that frame, gaps[k] the frames skipped before it.
-    Each segment is registered (multi-scale ICP) against everything placed so far, from where the previous segment
-    lost the camera and from a global feature match. A result is only kept if the camera could physically have moved
-    there during the gap and enough of the segment lands on the model. Returns (world pose or None, overlap, note)
-    per segment."""
+    camera pose = identity), last_poses[k] its last camera pose in that frame, gaps[k] the frames skipped before it,
+    priors[k] (optional) a guess of its first camera pose in segment k-1's frame (from bridging odometry), made
+    prior_gaps[k] frames before the segment started. ups[k] (optional, from the IMU) is 'up' in segment k's frame: a
+    placement that tilts it more than GRAVITY_MAX_DEG from segment 0's is rejected.
+    Each segment is registered (multi-scale ICP) against everything placed so far: from the prior, from where the
+    previous segment lost the camera, and from a global feature match. A result is only kept if it lies within reach
+    of the prior (or, without one, if the camera could physically have moved there during the gap) and enough of the
+    segment lands on the model. Returns (world pose or None) and (overlap, note) per segment."""
     world, results = [np.identity(4)], [(1.0, "")]
     placed = o3d.geometry.PointCloud(clouds[0])
     for k in range(1, len(clouds)):
-        last_seen = world[k - 1] @ last_poses[k - 1] if world[k - 1] is not None else None
-        limit = (MOTION_MARGIN[0] + MAX_SPEED_M * gaps[k], MOTION_MARGIN[1] + MAX_TURN_DEG * gaps[k])
-        bounded = last_seen is not None and limit[1] < 180
-        inits = ([last_seen] if last_seen is not None else []) + [global_match(clouds[k], placed)]
+        prev = world[k - 1]
+        last_seen = prev @ last_poses[k - 1] if prev is not None else None
+        prior = prev @ priors[k] if priors and priors[k] is not None and prev is not None else None
+        if prior is not None:
+            n = prior_gaps[k] if prior_gaps else 0
+            anchor, limit = prior, (PRIOR_LIMIT[0] + MAX_SPEED_M * n, PRIOR_LIMIT[1] + MAX_TURN_DEG * n)
+        else:
+            anchor = last_seen
+            limit = (MOTION_MARGIN[0] + MAX_SPEED_M * gaps[k], MOTION_MARGIN[1] + MAX_TURN_DEG * gaps[k])
+        bounded = anchor is not None and limit[1] < 180
+        inits = [(x, 16) for x in (prior, last_seen) if x is not None] + [(global_match(clouds[k], placed), 4)]
         best = (None, 0.0, "no plausible match")
-        for init in inits:
-            T, fitness, _ = multiscale_icp(clouds[k], placed, init)
+        for init, coarsest in inits:
+            T, fitness, _ = multiscale_icp(clouds[k], placed, init, coarsest)
+            if ups and ups[0] is not None and ups[k] is not None:
+                tilt = np.degrees(np.arccos(np.clip(np.dot(T[:3, :3] @ ups[k], ups[0]), -1, 1)))
+                if tilt > GRAVITY_MAX_DEG:
+                    continue
+            note = "global match"
             if bounded:
-                m, deg = pose_change(last_seen, T)
+                m, deg = pose_change(anchor, T)
                 if m > limit[0] or deg > limit[1]:
                     continue
+                note = f"{m * 100:.0f} cm, {deg:.0f} deg from the {'bridged' if prior is not None else 'last seen'} pose"
             need = NEAR_MIN_FITNESS if bounded else PLACE_MIN_FITNESS
             if fitness >= need and fitness > best[1]:
-                best = (T, fitness, "near last seen pose" if bounded else "global match")
+                best = (T, fitness, note)
         T, fitness, note = best
         world.append(T)
         results.append((fitness, note))
