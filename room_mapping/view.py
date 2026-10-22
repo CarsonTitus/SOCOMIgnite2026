@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 view.py
-Opens a reconstructed model in the Open3D viewer, by recording number.
+Opens a reconstructed model in the Open3D viewer, by recording number: levelled (floor at the bottom) and shown in
+the scanned colours, without lighting.
 
 Usage:
     python view.py 1              # recording 001's loop-closed mesh if there is one, else the plain mesh
@@ -10,17 +11,18 @@ Usage:
     python view.py 1 --slice      # level the model, cut 0.5 m off the top (the ceiling), view from the top
     python view.py 1 --slice 1.0  # same, cut 1.0 m off the top
     python view.py 1 --measure    # Ctrl+click surfaces for distances (from the viewpoint and between clicks);
-                                  # 1 = orbit, 2 = fly (WASD, Q up, Z down). Combine with --slice to remove the ceiling
+                                  # 1 = orbit, 2 = fly (WASD, Q up, Z down), E / R = tilt left / right.
+                                  # Combine with --slice to remove the ceiling
     python view.py some/file.ply
 """
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 
 OUTPUT = Path(__file__).parent / "output"
+ROLL_STEP = 5  # degrees per E / R press
 
 
 def find_up(normals, seed=(0, -1, 0)):
@@ -87,14 +89,14 @@ def view_top_down(path, geom):
                                       zoom=0.7, mesh_show_back_face=True)
 
 
-def view_measure(path, geom):
+def view_measure(path, geom, tools=True):
     """Ctrl+click surfaces to drop numbered points; connect any two from the side panel to measure between them.
-    1 = orbit, 2 = fly (WASD, Q up, Z down)."""
+    1 = orbit, 2 = fly (WASD, Q up, Z down). tools=False: the same view without the measuring panel."""
     import open3d as o3d
     from open3d.visualization import gui, rendering
     app = gui.Application.instance
     app.initialize()
-    win = app.create_window(f"{path.name} - Ctrl+click to measure", 1600, 900)
+    win = app.create_window(f"{path.name} - Ctrl+click to measure" if tools else path.name, 1600, 900)
     em = win.theme.font_size
     scene = gui.SceneWidget()
     scene.scene = rendering.Open3DScene(win.renderer)
@@ -112,7 +114,8 @@ def view_measure(path, geom):
     blue.base_color = (0, 0.3, 1, 1)
     blue.line_width = 3
 
-    info = gui.Label("Ctrl+click = add point   1 = orbit   2 = fly (WASD move, Q up, Z down, drag to look)")
+    info = gui.Label(("Ctrl+click = add point   " if tools else "")
+                     + "1 = orbit   2 = fly (WASD move, Q up, Z down, drag to look)   E / R = tilt left / right")
     status = gui.Label("")
     panel = gui.ScrollableVert(0.4 * em, gui.Margins(0.6 * em, 0.6 * em, 0.6 * em, 0.6 * em))
     chain = gui.Checkbox("Chain: connect each new point to the previous")
@@ -130,11 +133,12 @@ def view_measure(path, geom):
         panel.add_child(w)
     win.add_child(scene)
     win.add_child(info)
-    win.add_child(panel)
+    if tools:
+        win.add_child(panel)
 
     def on_layout(ctx):
         r = win.content_rect
-        pw = min(32 * em, r.width // 2)  # minimised / closing windows report width 0; a negative size crashes Filament
+        pw = min(32 * em, r.width // 2) if tools else 0  # minimised / closing windows report width 0; a negative size crashes Filament
         scene.frame = gui.Rect(r.x, r.y, max(r.width - pw, 1), max(r.height, 1))
         panel.frame = gui.Rect(r.get_right() - pw, r.y, pw, r.height)
         info.frame = gui.Rect(r.x + 8, r.y + 8, max(r.width - pw - 16, 1),
@@ -236,12 +240,28 @@ def view_measure(path, geom):
             app.post_to_main_thread(win, lambda: add_point(point, eye))
         scene.scene.scene.render_to_depth_image(on_depth)
         return gui.Widget.EventCallbackResult.HANDLED
-    scene.set_on_mouse(on_mouse)
+    if tools:
+        scene.set_on_mouse(on_mouse)
+
+    def roll(deg):
+        """Tilt the camera about its viewing direction: + = right (clockwise), - = left."""
+        model = np.asarray(scene.scene.camera.get_model_matrix())  # camera -> world; camera looks down -z
+        right, up, eye = model[:3, 0], model[:3, 1], model[:3, 3]
+        fwd = -model[:3, 2]
+        t = np.radians(deg)
+        dist = max(float((np.asarray(scene.center_of_rotation) - eye) @ fwd), 0.5)  # keep the orbit centre's depth
+        scene.look_at(eye + dist * fwd, eye, np.cos(t) * up + np.sin(t) * right)
+        scene.force_redraw()
 
     def on_key(e):
-        if e.type == gui.KeyEvent.Type.DOWN and e.key in (gui.KeyName.ONE, gui.KeyName.TWO):
+        if e.type != gui.KeyEvent.Type.DOWN:
+            return gui.Widget.EventCallbackResult.IGNORED
+        if e.key in (gui.KeyName.ONE, gui.KeyName.TWO):
             scene.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA if e.key == gui.KeyName.ONE
                                     else gui.SceneWidget.Controls.FLY)
+            return gui.Widget.EventCallbackResult.HANDLED
+        if e.key in (gui.KeyName.E, gui.KeyName.R):  # Open3D's own E (fly mode) only tilts one way
+            roll(-ROLL_STEP if e.key == gui.KeyName.E else ROLL_STEP)
             return gui.Widget.EventCallbackResult.HANDLED
         return gui.Widget.EventCallbackResult.IGNORED
     scene.set_on_key(on_key)
@@ -282,7 +302,7 @@ def main():
     elif args.slice is not None:
         view_top_down(path, load_level(path, args.slice))
     else:
-        subprocess.run([str(Path(sys.executable).parent / "open3d"), "draw", str(path)])
+        view_measure(path, load_level(path), tools=False)
 
 
 if __name__ == "__main__":
