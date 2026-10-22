@@ -19,6 +19,8 @@ import java.util.zip.Deflater
 import java.util.zip.DeflaterOutputStream
 
 /** Pinhole intrinsics of the depth stream (colour is aligned to it). */
+private class ImuSample(val t: Double, val sensor: Char, val x: Float, val y: Float, val z: Float)
+
 data class Intrinsics(val width: Int, val height: Int, val fx: Float, val fy: Float, val ppx: Float, val ppy: Float)
 
 /**
@@ -27,13 +29,17 @@ data class Intrinsics(val width: Int, val height: Int, val fx: Float, val fy: Fl
  *     color/000000.jpg   colour aligned to depth (JPEG 90)
  *     depth/000000.png   16-bit depth in raw units (lossless PNG)
  *     intrinsic.json     Open3D PinholeCameraIntrinsic (depth camera)
- *     meta.json          depth_scale, fps, frame timestamps, dropped-frame count
+ *     meta.json          depth_scale, fps, frame timestamps, dropped-frame count (+ "imu" info if recorded)
+ *     imu.csv            optional: t_ms,sensor,x,y,z (g = gyro rad/s, a = accel m/s^2, IMU axes, frame clock)
  */
 class FrameWriter(val folder: File, private val intr: Intrinsics, depthScale: Double, fps: Int) {
     private val pool = Executors.newFixedThreadPool(WRITER_THREADS)
     private val pending = AtomicInteger(0)
     private val timestamps = ArrayList<Double>()
     private val meta = JSONObject()
+    private val imu = ArrayList<ImuSample>()  // guarded by itself: added from librealsense's motion callback thread
+    /** Gyro/accel rates and the IMU-to-depth rotation, as in capture.py's meta["imu"]; null = no IMU. */
+    var imuInfo: JSONObject? = null
     var count = 0
         private set
     var dropped = 0
@@ -70,11 +76,28 @@ class FrameWriter(val folder: File, private val intr: Intrinsics, depthScale: Do
 
     fun pending() = pending.get()
 
+    /** sensor: 'g' (gyro, rad/s) or 'a' (accel, m/s^2). Safe to call from any thread. */
+    fun addImu(timestampMs: Double, sensor: Char, x: Float, y: Float, z: Float) {
+        synchronized(imu) { imu.add(ImuSample(timestampMs, sensor, x, y, z)) }
+    }
+
+    fun imuCount() = synchronized(imu) { imu.size }
+
     /** Waits for queued frames to reach storage, then writes meta.json. */
     fun close() {
         pool.shutdown()
         pool.awaitTermination(10, TimeUnit.MINUTES)
         meta.put("timestamps_ms", JSONArray(timestamps)).put("dropped", dropped)
+        val samples = synchronized(imu) { imu.sortedBy { it.t } }
+        imuInfo?.let { info ->
+            if (samples.isNotEmpty()) {
+                File(folder, "imu.csv").bufferedWriter().use { out ->
+                    out.write("t_ms,sensor,x,y,z\n")
+                    for (s in samples) out.write("%.3f,%c,%.6f,%.6f,%.6f\n".format(Locale.US, s.t, s.sensor, s.x, s.y, s.z))
+                }
+                meta.put("imu", JSONObject(info.toString()).put("samples", samples.size))
+            }
+        }
         File(folder, "meta.json").writeText(meta.toString())
     }
 

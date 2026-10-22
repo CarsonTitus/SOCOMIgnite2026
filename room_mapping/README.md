@@ -60,7 +60,9 @@ shattered), `--track-depth-max` the tracking range (3 m). `--no-bridge` / `--no-
 
 **IMU:** `capture.py` records the D455's gyro + accelerometer to `imu.csv` (in the recording folder; `--no-imu` to skip).
 `reconstruct.py` prints an "IMU check" line comparing the gyro with tracking: it should differ by far less than the
-tracking turn per frame. The Android app doesn't record the IMU yet.
+tracking turn per frame. The Android app records it too. With `--loop-closure`, each fragment also gets a gravity
+edge so the path can't tilt (roll/pitch) away from the accelerometer's 'up'; heading stays free. It prints a
+"gravity:" line with each fragment's tilt off the common 'up' before and after.
 
 **Scanning tips:** move slowly, stay within about 2.5 m of surfaces, overlap your views, and finish where you started
 (that's what lets loop closure fix drift). **Close the blinds:** looking out bright windows made tracking fail
@@ -87,8 +89,9 @@ Scans stay outside the Unity project and the repo.
 
 ### Recording on the Pixel (Android app, in progress)
 `android/` is a small standalone app (not part of PSYOP-VISR) that does what `capture.py` does: live colour | depth
-preview and REC/STOP. Recordings use the same folder layout and settings, so `reconstruct.py`, `view.py` and
-`export_unity.py` work on them unchanged. The phone needs an all-USB-3.2 C-to-C cable to the D455.
+preview and REC/STOP, plus the D455's gyro/accelerometer (`imu.csv`). Recordings use the same folder layout and
+settings, so `reconstruct.py`, `view.py` and `export_unity.py` work on them unchanged. The phone needs an
+all-USB-3.2 C-to-C cable to the D455: the app won't start on a USB 2 link and says so.
 
 **Build (Ubuntu, no Android Studio needed).** Toolchain under `~/Android`: JDK 17 (Temurin), SDK command-line tools,
 then `sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;28.0.13004108" "cmake;3.22.1"`.
@@ -108,7 +111,8 @@ $ADB connect <ip>:<port shown on the Wireless debugging screen>
 $ADB install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**Use.** Open *D455 Recorder*, plug in the camera, allow USB and camera access. Wait for READY, then tap REC/STOP.
+**Use.** Open *D455 Recorder*, plug in the camera, allow USB and camera access. Wait for READY (it shows the IMU rates, or NO IMU), then tap
+REC/STOP; the REC line counts IMU samples.
 Recordings go to `Android/data/com.socom.d455recorder/files/recordings/NNN_…` on the phone (~440 MB per minute).
 Copy one to the PC, renumbering so it doesn't clash with PC recordings:
 ```bash

@@ -377,10 +377,15 @@ def main():
         t1 = time.time()
         print(f"\nLoop closure: fragments of {args.fragment_size} frames...")
         lc_poses, st = loop_closure.optimize_poses(args.recording, frame_ids, poses, K, depth_scale, args.track_depth_max,
-                                                   args.voxel, args.fragment_size, device)
+                                                   args.voxel, args.fragment_size, device,
+                                                   ups=[up_at(f) for f in frame_ids] if accel is not None else None)
         print(f"  {st['fragments']} fragments, {st['pairs_checked']} pairs registered, "
               f"{st['loops_found']} loop closures found, {st['loops_kept']} kept after optimisation")
         print(f"  correction at end of path: {100 * st['end_shift_m']:.1f} cm, {st['end_shift_deg']:.2f} deg")
+        if "tilt_after_deg" in st:
+            b, a = st["tilt_before_deg"], st["tilt_after_deg"]
+            print(f"  gravity: tilt off the start's 'up' per fragment, median/max {np.median(b):.2f}/{b.max():.2f} deg "
+                  f"before -> {np.median(a):.2f}/{a.max():.2f} deg after")
         print_path_stats(lc_poses)
         pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, lc_poses, K, depth_scale, args.depth_max,
                                                args.voxel, args.block_count, device)

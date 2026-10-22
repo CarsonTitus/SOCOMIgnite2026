@@ -7,7 +7,9 @@ Frame-to-model tracking drifts a few mm per frame. This corrects it after record
   2. Register fragment pairs with multi-scale colored ICP, starting from the tracked poses. Neighbouring
      fragments give odometry edges; non-neighbouring pairs that overlap (the camera came back to a place it
      had already seen) give loop-closure edges.
-  3. Optimise the pose graph (Levenberg-Marquardt), pruning loop edges that disagree with the rest.
+  3. Optimise the pose graph (Levenberg-Marquardt), pruning loop edges that disagree with the rest. With an IMU,
+     each fragment also gets a gravity edge: its accelerometer 'up' should point the same way in the world, so
+     tilt (roll/pitch) can't drift, while heading (yaw) stays free.
   4. Push each fragment's correction to its frames and re-integrate everything into one model.
 
 Loop candidates are found by ICP from the tracked poses, not by global feature matching, so this corrects
@@ -30,6 +32,7 @@ MAX_JUMP_DEG = 20.0       # ...or rotate it more than this (drift is small; big 
 # which doubled the floor and ceiling; real corrections there were under 7 cm. 007's whole-scan end gap was 22 cm.
 JUMP_BASE = (0.05, 2.0)   # m, deg allowed between fragments right next to each other in time...
 JUMP_RATE = (0.01, 0.3)   # ...plus this much per second between them
+GRAVITY_WEIGHT = 1.0      # tilt stiffness of a gravity edge, relative to a typical odometry edge's rotation stiffness
 
 
 def new_volume(voxel, block_count, device):
@@ -116,9 +119,57 @@ def pose_change(a, b):
     return np.linalg.norm(d[:3, 3]), angle
 
 
+def rotation_between(a, b):
+    """Smallest rotation taking unit vector a onto unit vector b."""
+    v, c = np.cross(a, b), float(a @ b)
+    if np.linalg.norm(v) < 1e-9:
+        return np.identity(3)
+    V = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.identity(3) + V + V @ V / (1 + c)
+
+
+def fragment_ups(poses, starts, fragment_size, ups):
+    """Measured 'up' of each fragment in its first frame's camera axes (mean over its frames), or None."""
+    out = []
+    for s in starts:
+        R0 = poses[s][:3, :3]
+        v = [R0.T @ poses[i][:3, :3] @ ups[i] for i in range(s, min(s + fragment_size, len(poses))) if ups[i] is not None]
+        u = np.sum(v, axis=0) if v else None
+        out.append(None if u is None else u / np.linalg.norm(u))
+    return out
+
+
+def tilt_vs_gravity(frag_pose, frag_up):
+    """World 'up' and each fragment's angle (deg) off it. World up is the first fragment's measured 'up', because
+    that fragment is the fixed reference: the mean over all of them would be off by the average drift, and pulling
+    everything to it would bend the path where it starts."""
+    first = next(k for k, u in enumerate(frag_up) if u is not None)
+    U = frag_pose[first][:3, :3] @ frag_up[first]
+    world = np.array([P[:3, :3] @ u for P, u in zip(frag_pose, frag_up) if u is not None])
+    return U, np.degrees(np.arccos(np.clip(world @ U, -1, 1)))
+
+
+def add_gravity_edges(graph, frag_pose, frag_up, weight):
+    """One edge per fragment to fragment 0 (the fixed reference) that only constrains tilt: its target rotation
+    tips the fragment's measured 'up' onto the world up, and its information matrix weights rotation about
+    the two axes perpendicular to that up (in the fragment's own axes, where Open3D measures an edge's error)."""
+    U, _ = tilt_vs_gravity(frag_pose, frag_up)
+    for k in range(1, len(frag_pose)):
+        u = frag_up[k]
+        if u is None:
+            continue
+        R = frag_pose[k][:3, :3]
+        target = frag_pose[k].copy()
+        target[:3, :3] = rotation_between(R @ u, U) @ R
+        info = np.zeros((6, 6))
+        info[:3, :3] = weight * (np.identity(3) - np.outer(u, u))
+        graph.edges.append(reg.PoseGraphEdge(k, 0, np.linalg.inv(frag_pose[0]) @ target, info, uncertain=False))
+
+
 def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel,
-                   fragment_size=30, device=o3c.Device("CPU:0"), fps=30):
-    """Returns loop-closed camera-to-world poses for frame_ids, plus a stats dict."""
+                   fragment_size=30, device=o3c.Device("CPU:0"), fps=30, ups=None):
+    """Returns loop-closed camera-to-world poses for frame_ids, plus a stats dict. ups: optional measured 'up'
+    (accelerometer, unit vector in camera axes, or None) per pose; adds gravity edges that keep the path level."""
     poses = np.asarray(poses)
     clouds, starts = build_fragments(recording, frame_ids, poses, K, depth_scale, depth_max, voxel,
                                      fragment_size, device)
@@ -158,6 +209,13 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
                 edges.append((s, t, fitness, jump_m, jump_deg, info))
                 loops += 1
 
+    frag_up = fragment_ups(poses, starts, fragment_size, ups) if ups is not None else [None] * n
+    with_up = sum(u is not None for u in frag_up)
+    if with_up > 1:
+        # scale to the odometry edges' rotation stiffness (point-to-plane information: ~points x distance^2)
+        rot = np.median([np.trace(e.information[:3, :3]) / 3 for e in graph.edges if not e.uncertain])
+        add_gravity_edges(graph, frag_pose, frag_up, GRAVITY_WEIGHT * rot)
+
     level = o3d.utility.get_verbosity_level()
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     reg.global_optimization(
@@ -176,6 +234,9 @@ def optimize_poses(recording, frame_ids, poses, K, depth_scale, depth_max, voxel
     end_shift_m, end_shift_deg = pose_change(poses[-1], corrected[-1])
     stats = {"fragments": n, "pairs_checked": checked, "loops_found": loops, "loops_kept": kept,
              "end_shift_m": end_shift_m, "end_shift_deg": end_shift_deg, "loop_edges": edges}
+    if with_up > 1:
+        stats["tilt_before_deg"] = tilt_vs_gravity(frag_pose, frag_up)[1]
+        stats["tilt_after_deg"] = tilt_vs_gravity([nd.pose for nd in graph.nodes], frag_up)[1]
     return corrected, stats
 
 

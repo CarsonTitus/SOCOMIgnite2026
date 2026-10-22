@@ -23,19 +23,25 @@ import com.intel.realsense.librealsense.DepthSensor
 import com.intel.realsense.librealsense.Device
 import com.intel.realsense.librealsense.DeviceListener
 import com.intel.realsense.librealsense.Extension
+import com.intel.realsense.librealsense.Extrinsic
+import com.intel.realsense.librealsense.FrameCallback
+import com.intel.realsense.librealsense.MotionFrame
 import com.intel.realsense.librealsense.Intrinsic
 import com.intel.realsense.librealsense.Option
 import com.intel.realsense.librealsense.Pipeline
 import com.intel.realsense.librealsense.RsContext
+import com.intel.realsense.librealsense.Sensor
 import com.intel.realsense.librealsense.StreamFormat
 import com.intel.realsense.librealsense.StreamType
 import com.intel.realsense.librealsense.VideoStreamProfile
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import kotlin.concurrent.thread
 
 /**
  * D455 recorder: live colour | depth preview, tap REC to start/stop. Same settings and output as
- * room_mapping/capture.py (848x480 depth, 640x480 colour aligned to depth, 30 fps), written to
+ * room_mapping/capture.py (848x480 depth, 640x480 colour aligned to depth, 30 fps, + the D455's gyro/accel), written to
  * /sdcard/Android/data/com.socom.d455recorder/files/recordings/NNN_YYYYMMDD_HHMMSS/.
  */
 class MainActivity : AppCompatActivity() {
@@ -48,7 +54,9 @@ class MainActivity : AppCompatActivity() {
     private var cameraThread: Thread? = null
     @Volatile private var running = false
     @Volatile private var wantRecording = false
+    @Volatile private var imuWriter: FrameWriter? = null  // the recording IMU samples go to, if any
     private lateinit var recordingsRoot: File
+    @Volatile private var imuText = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -153,13 +161,22 @@ class MainActivity : AppCompatActivity() {
         val align = Align(StreamType.DEPTH)
         var writer: FrameWriter? = null
         var recStart = 0L
+        var device: Device? = null  // kept open while the IMU runs: closing a Device releases its sensors
+        var imu: Sensor? = null
+        var imuInfo: JSONObject? = null
         try {
             setStatus("Starting camera...")
             val depthScale = Config().use { cfg ->
                 cfg.enableStream(StreamType.DEPTH, -1, DEPTH_W, DEPTH_H, StreamFormat.Z16, FPS)
                 cfg.enableStream(StreamType.COLOR, -1, COLOR_W, COLOR_H, StreamFormat.RGB8, FPS)
-                pipe.start(cfg).use { profile -> profile.device.use { setUpDepthSensor(it) } }
+                pipe.start(cfg).use { profile -> profile.device.also { device = it }.let { setUpDepthSensor(it) } }
             }
+            try {
+                startImu(device!!, pipe)?.let { (sensor, info) -> imu = sensor; imuInfo = info }
+            } catch (e: Exception) {  // never lose a recording over the IMU
+                Log.w(TAG, "IMU: could not start, recording without it", e)
+            }
+            imuText = imuInfo?.let { "IMU %d/%d Hz".format(it.getInt("gyro_hz"), it.getInt("accel_hz")) } ?: "NO IMU"
             val intr = depthIntrinsics(pipe)
             repeat(WARMUP_FRAMES) { pipe.waitForFrames(5000).close() }  // let auto-exposure settle
             runOnUiThread { recButton.isEnabled = true }
@@ -173,10 +190,13 @@ class MainActivity : AppCompatActivity() {
             while (running) {
                 if (wantRecording && writer == null) {
                     writer = FrameWriter(FrameWriter.nextRecordingFolder(recordingsRoot), intr, depthScale, FPS)
+                    writer.imuInfo = imuInfo
+                    imuWriter = writer
                     recStart = SystemClock.elapsedRealtime()
                     lastNumber = -1
                     Log.i(TAG, "recording to ${writer.folder}")
                 } else if (!wantRecording && writer != null) {
+                    imuWriter = null
                     finishRecording(writer, recStart)
                     writer = null
                 }
@@ -211,8 +231,11 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "camera error", e)
             setStatus("Camera error: ${e.message}")
         } finally {
+            imuWriter = null
+            imu?.let { runCatching { it.stop() }; runCatching { it.closeSensor() } }
             writer?.let { finishRecording(it, recStart) }
             runCatching { pipe.stop() }
+            device?.close()
             align.close()
             pipe.close()
             runOnUiThread { recButton.isEnabled = false }
@@ -225,6 +248,41 @@ class MainActivity : AppCompatActivity() {
         val s = device.querySensors().first { it.`is`(Extension.DEPTH_SENSOR) }.`as`<DepthSensor>(Extension.DEPTH_SENSOR)
         if (s.supports(Option.EMITTER_ENABLED)) s.setValue(Option.EMITTER_ENABLED, 1f)
         return 1.0 / s.depthScale
+    }
+
+    /**
+     * Starts the D455's motion sensor (gyro + accelerometer, slowest rates, like capture.py) feeding [imuWriter].
+     * Returns the sensor and the meta.json "imu" info (rates, IMU-to-depth rotation), or null without an IMU.
+     */
+    private fun startImu(device: Device, pipe: Pipeline): Pair<Sensor, JSONObject>? {
+        val motion = device.querySensors().firstOrNull { it.`is`(Extension.MOTION_SENSOR) } ?: return null
+        val profiles = motion.streamProfiles.filter { it.format == StreamFormat.MOTION_XYZ32F }
+        val gyro = profiles.filter { it.type == StreamType.GYRO }.minByOrNull { it.frameRate } ?: return null
+        val accel = profiles.filter { it.type == StreamType.ACCEL }.minByOrNull { it.frameRate } ?: return null
+        val ext = pipe.activeStreams.let { active ->
+            try {
+                gyro.getExtrinsicTo(active.first { it.type == StreamType.DEPTH })
+            } finally {
+                active.forEach { it.close() }
+            }
+        }
+        // The Java Extrinsic has no getters; librealsense stores the rotation column-major
+        fun f(name: String) = Extrinsic::class.java.getDeclaredField(name).apply { isAccessible = true }.get(ext) as FloatArray
+        val rot = f("mRotation")
+        val info = JSONObject()
+            .put("gyro_hz", gyro.frameRate).put("accel_hz", accel.frameRate)
+            .put("to_depth", JSONObject()
+                .put("rotation", JSONArray((0 until 3).map { r -> JSONArray((0 until 3).map { c -> rot[c * 3 + r].toDouble() }) }))
+                .put("translation", JSONArray(f("mTranslation").map { it.toDouble() })))
+        motion.openSensor(listOf(gyro, accel))
+        // Frames passed to the callback belong to librealsense: read them, don't close them
+        motion.start(FrameCallback { frame ->
+            val w = imuWriter ?: return@FrameCallback
+            val m = frame.`as`<MotionFrame>(Extension.MOTION_FRAME).motionData
+            w.addImu(frame.timestamp, if (frame.profile.type == StreamType.GYRO) 'g' else 'a', m.x, m.y, m.z)
+        })
+        Log.i(TAG, "IMU: $info")
+        return motion to info
     }
 
     private fun depthIntrinsics(pipe: Pipeline): Intrinsics {
@@ -252,10 +310,11 @@ class MainActivity : AppCompatActivity() {
     private fun statusLine(w: FrameWriter?, recStart: Long): String {
         if (w == null) {
             val freeGb = recordingsRoot.usableSpace / 1e9
-            return "READY  %dx%d @ %d fps   %.0f GB free (~2.3 GB per 5 min)".format(DEPTH_W, DEPTH_H, FPS, freeGb)
+            return "READY  %dx%d @ %d fps   %s   %.0f GB free (~2.3 GB per 5 min)".format(DEPTH_W, DEPTH_H, FPS, imuText, freeGb)
         }
         val el = (SystemClock.elapsedRealtime() - recStart) / 1000
-        return "● REC %02d:%02d   %d frames   dropped %d   queue %d".format(el / 60, el % 60, w.count, w.dropped, w.pending())
+        return "● REC %02d:%02d   %d frames   dropped %d   queue %d   IMU %d".format(
+            el / 60, el % 60, w.count, w.dropped, w.pending(), w.imuCount())
     }
 
     private fun showPreview(depth: ByteArray, color: ByteArray, intr: Intrinsics, depthScale: Double, px: IntArray) {

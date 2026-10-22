@@ -140,15 +140,24 @@ memory don't follow between machines, so this section is the handoff.
      with IMU, tilt vs gravity < 5 deg). RANSAC is seeded so builds are reproducible. Scores vs 010 (3 cm / 10 cm):
      008 30/47% -> 41/73%; 009 22/40% -> 27-35/51-68% (its 3rd segment overlaps only ~15%, so its placement is
      fragile); 010 unchanged. Old builds in `output/00[89]_before_reanchor/`.
-   - **IMU (2026-10-16, untested on hardware):** `capture.py` records `imu.csv` (gyro/accel, IMU axes) + `meta["imu"]`
+   - **IMU (2026-10-16):** `capture.py` records `imu.csv` (gyro/accel, IMU axes) + `meta["imu"]`
      (rates, rotation to depth axes); `rgbd_io.read_imu` returns them in depth axes. `reconstruct.py` uses the gyro's
      rotation in bridging (init, override when the odometry disagrees > 2 deg/frame, gyro-only when odometry fails),
      gravity to gate segment joins, saves `_up.npy`, and prints an "IMU check". Tested only with IMU simulated from
      009's path (mechanics OK: gyro vs tracking 0.03 deg/frame). With the gyro the bridge's rotation is better but its
-     translation still drifts (~44 cm over 28 frames). **Next:** a blinds-open laptop recording like 009 with the IMU
-     (check `imu.csv` exists, the "IMU check" line, then score vs 010); window-glass masking / plane fill (Mirror3D
-     idea, arXiv 2106.06629: fit the plane from the depth around the glass) not started; app IMU recording; live
-     low-depth / too-fast warning in the recorders. Phone not available for now (partner using it).
+     translation still drifts (~44 cm over 28 frames).
+   - **Phone scans + IMU (2026-10-22):** 011 (phone, blinds closed, slow, no IMU) is clean: 0 lost, LC 23 cm/4.4 deg,
+     vs 010 48/68/88% within 3/5/10 cm (best so far), so the phone was never the problem (008 = windows + speed). Its
+     ceiling is doubled ~12 cm (tilt drift; the ceiling is >4 m up, near the 3 m depth limit). The app now records
+     the IMU (same `imu.csv`/`meta["imu"]`; 200 Hz gyro, 63 Hz accel, IMU->depth rotation identity) and shows the rates
+     on READY. 012 (17 s phone test): IMU check 0.12 vs 0.73 deg/frame, so axes and clock are right.
+     **Gravity edges in loop closure** (`loop_closure.add_gravity_edges`): one edge per fragment to fragment 0 that
+     only weights tilt, world up = the first fragment's measured up. 012: per-second tilt vs start median 1.43 -> 0.74
+     deg (LC alone barely helps). Simulated 6 deg drift on 011: tilt error 2.14/4.66 -> 0.81/1.51 deg (median/max),
+     position 16.5 -> 11.6 cm; GRAVITY_WEIGHT 10 fit the noisy up tighter but wasn't closer to truth, so 1.
+     **Next:** a full phone scan of the room with the IMU to see whether the ceiling step goes; window-glass masking
+     (track on the pixels around the glass instead of skipping the frame) and trying RTAB-Map on 009 for
+     building-scale scans with many windows; live low-depth / too-fast warning in the recorders.
    - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
      (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
      at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and
