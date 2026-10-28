@@ -47,6 +47,9 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `compare.py`: scores a model against a reference model of the same room (align, then share of surface within 3/5/10 cm)
 - `play.py`, `reconstruct.py` and `view.py` all accept a recording number (`1`/`001`) or a path
 - `android/`: Pixel recorder app (Kotlin, Gradle); same recording folder format as `capture.py`. Build/install steps in README.
+- `fill_openings.py` (experimental): fills glass/glossy screens in a finished model with light-blue planes →
+  `<name>_lc_filled_mesh.ply`, opened by `view.py N --filled`. Unreliable on bent models (014: 2-11 m² between builds)
+- `rtabmap/`: C++ runner for RTAB-Map (ROS 2 Humble `ros-humble-rtabmap`, /opt/ros/humble), comparison only; README
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
 
 ## Workflow
@@ -70,7 +73,7 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `Scene.render_to_depth_image` (0.20, Windows/Vulkan) returns view-space depth in metres with inf for background,
   not 0-1, and `Camera.unproject` gave NaN; `--measure` builds the ray from the inverse projection matrix instead.
   The gui window exits with code 127 on close (Python finalisation error); harmless.
-- `pyrealsense2` (pip) must match the apt SDK version (currently 2.58.4).
+- `pyrealsense2` (pip) must match the apt SDK version: apt is 2.59.1 since the RTAB-Map install (2026-10-28), the `.venv` still has 2.58.4.
 
 ## Notes
 - Keep code portable to the Jetson (ARM64, JetPack/L4T). Avoid x86-only dependencies.
@@ -158,6 +161,28 @@ memory don't follow between machines, so this section is the handoff.
      **Next:** a full phone scan of the room with the IMU to see whether the ceiling step goes; window-glass masking
      (track on the pixels around the glass instead of skipping the frame) and trying RTAB-Map on 009 for
      building-scale scans with many windows; live low-depth / too-fast warning in the recorders.
+   - **IMU is uncalibrated (2026-10-26):** |accel| reads ~9.1 not 9.81 m/s², gyro drifts ~0.6-1.5 deg/s. On 013
+     (full phone scan, blinds closed, IMU) gravity edges made it worse: LC end correction 70 cm vs 19.5 cm without
+     the IMU, 37/49/68% vs 44/55/70% within 3/5/10 cm of 010. **Gravity edges are still on by default when a
+     recording has an IMU: build with `--no-imu` until the IMU is calibrated** (6-orientation software calibration
+     planned, not started; Intel's tool writes to the camera, ask first).
+   - **Windows (2026-10-26/28):** in 014 (blinds open) glass gives valid depth from outside (>3 m), not missing depth,
+     and tracking already ignores >3 m; what split the scan was the 30% `--weak-usable` gate (12-27% in range at the
+     windows, mostly because the camera looks up at the 4.5 m ceiling). New defaults `--weak-usable 0.1`
+     `--fragment-size 15`: 014 stays one piece (coverage of 013 32 -> 59-63% within 10 cm, like 011), but less
+     accurate (52% within 10 cm vs 82% for 011): the floor is doubled where the window passes drifted. 010/011
+     unchanged (no window frames). Tried and rejected: tracking to 5 m (`--track-depth-max 5`, ceiling noise splits
+     it again), building only well-covered frames (model stops growing, splits again). Scoring: `compare.py` only
+     measures accuracy (model near reference); also check coverage (reference near model).
+   - **Recorders keep colour whole (2026-10-28):** colour 848x480, depth aligned to it (`meta["aligned_to"]="color"`,
+     IMU rotation key `to_camera`). Old format blacked out 16-20% of each colour image where depth was missing, which
+     broke RTAB-Map (265 odometry resets on 013). 015 (new app, blinds open, 65 s): 0% blacked out, edges line up,
+     26 dropped frames all in the first 10 s; our pipeline 0 lost, 31/42/59% vs 013.
+   - **RTAB-Map (2026-10-28):** installed from the ROS 2 Humble apt repo, which upgraded librealsense to **2.59.1**
+     (`.venv` pyrealsense2 is still 2.58.4: upgrade before live capture on the tower). On 015, same 217 keyframes
+     built our way: our poses 35/49/70%, RTAB-Map's 27/37/56% (vs 013, itself our pipeline's). Staying with ours.
+   - **Next:** multi-room scan through a doorway with the new app (user's plan, after approving the window result);
+     IMU calibration; then revisit gravity edges.
    - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
      (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
      at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and

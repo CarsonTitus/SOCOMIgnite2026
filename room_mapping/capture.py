@@ -2,7 +2,7 @@
 """
 capture.py
 Live D455 preview with start/stop recording to a compressed RGB-D folder
-(depth: lossless 16-bit PNG, colour: JPEG aligned to depth), numbered recordings/001_<date>_<time>, 002_..., ... See rgbd_io.py for the layout.
+(colour: JPEG, whole; depth: lossless 16-bit PNG aligned to the colour camera), numbered recordings/001_<date>_<time>, 002_..., ... See rgbd_io.py for the layout.
 
 Usage:
     python capture.py                   # preview window: SPACE = start/stop recording, Q/Esc = quit
@@ -23,7 +23,8 @@ import pyrealsense2 as rs
 from rgbd_io import FrameWriter, next_recording_folder
 
 DEPTH_W, DEPTH_H = 848, 480   # D455's best-quality depth mode
-COLOR_W, COLOR_H = 640, 480   # reconstruction works at depth resolution, so more colour is wasted
+COLOR_W, COLOR_H = 848, 480   # same size as depth. Depth is aligned to colour (not the other way round, which
+                              # blacked out the colour wherever depth was missing and broke visual tracking)
 FPS = 30
 WARMUP_FRAMES = 30            # let auto-exposure settle
 PREVIEW_RANGE_M = (0.3, 4.0)  # fixed colour scale so the preview doesn't "swim"
@@ -37,7 +38,7 @@ def start_camera():
     sensor = profile.get_device().first_depth_sensor()
     if sensor.supports(rs.option.emitter_enabled):
         sensor.set_option(rs.option.emitter_enabled, 1)  # IR dot pattern helps on blank walls
-    intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+    intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()  # depth is aligned to it
     K = np.array([[intr.fx, 0, intr.ppx], [0, intr.fy, intr.ppy], [0, 0, 1]])
     return pipe, K, 1.0 / sensor.get_depth_scale(), profile
 
@@ -51,7 +52,7 @@ def start_imu(profile, on_sample):
     profiles = [p for p in motion.get_stream_profiles() if p.format() == rs.format.motion_xyz32f]
     gyro = min((p for p in profiles if p.stream_type() == rs.stream.gyro), key=lambda p: p.fps())
     accel = min((p for p in profiles if p.stream_type() == rs.stream.accel), key=lambda p: p.fps())
-    ext = gyro.get_extrinsics_to(profile.get_stream(rs.stream.depth))
+    ext = gyro.get_extrinsics_to(profile.get_stream(rs.stream.color))
     kinds = {rs.stream.gyro: "g", rs.stream.accel: "a"}
 
     def callback(f):
@@ -61,8 +62,9 @@ def start_imu(profile, on_sample):
     motion.open([gyro, accel])
     motion.start(callback)
     info = {"gyro_hz": gyro.fps(), "accel_hz": accel.fps(),
-            # librealsense stores rotation column-major; this is the row-major 3x3 taking IMU axes to depth axes
-            "to_depth": {"rotation": np.array(ext.rotation).reshape(3, 3).T.tolist(),
+            # librealsense stores rotation column-major; this is the row-major 3x3 taking IMU axes to the camera's
+            # (the colour camera, which the recording's depth is aligned to)
+            "to_camera": {"rotation": np.array(ext.rotation).reshape(3, 3).T.tolist(),
                          "translation": list(ext.translation)}}
     return motion, info
 
@@ -94,7 +96,7 @@ def main():
     headless = args.seconds is not None
 
     pipe, K, depth_scale, profile = start_camera()
-    align = rs.align(rs.stream.depth)
+    align = rs.align(rs.stream.color)
     print(f"Camera started: depth {DEPTH_W}x{DEPTH_H}, colour {COLOR_W}x{COLOR_H} @ {FPS} fps")
     for _ in range(WARMUP_FRAMES):
         pipe.wait_for_frames()
@@ -117,7 +119,8 @@ def main():
     def start_recording():
         nonlocal writer, rec_start, last_fn, cam_dropped
         folder = next_recording_folder(args.out)
-        w = FrameWriter(folder, K, (DEPTH_H, DEPTH_W), depth_scale, FPS)
+        w = FrameWriter(folder, K, (COLOR_H, COLOR_W), depth_scale, FPS)
+        w.meta["aligned_to"] = "color"
         if imu_info:
             w.meta["imu"] = dict(imu_info)
         writer = w

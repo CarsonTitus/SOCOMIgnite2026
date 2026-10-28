@@ -30,6 +30,7 @@ import loop_closure
 from rgbd_io import open_recording, read_imu, resolve_recording
 
 RELOCK_FRAMES = 15   # after this many untrackable frames in a row (0.5 s) the pose is stale: start a new segment
+MIN_PIECE_M2 = 0.05  # mesh pieces smaller than this, not connected to anything, are noise (014: 43k of them)
 MIN_SEGMENT = 30     # segments shorter than this (1 s) are too small to place reliably, so they're dropped
 START_USABLE = 0.3   # a new segment starts on a frame with at least this share of depth in tracking range
 TRACK_STATES = ("tracked", "bridged", "new segment after bridge", "lost")   # codes 0-3 in <name>_track.npy
@@ -82,10 +83,11 @@ def main():
     ap.add_argument("--block-count", type=int, default=80000)
     ap.add_argument("--min-fitness", type=float, default=0.4,
                     help="skip frames where less than this share of the usable (in-range) depth matches the model")
-    ap.add_argument("--weak-usable", type=float, default=0.3,
+    ap.add_argument("--weak-usable", type=float, default=0.1,
                     help="frames with less than this share of pixels in tracking range are not tracked against the "
-                         "model (008: with only a floor in range it slid ~1 m/s sideways) nor integrated; their pose "
-                         "is bridged with frame-to-frame colour+depth odometry")
+                         "model nor integrated; their pose is bridged with frame-to-frame colour+depth odometry. Was "
+                         "0.3 (008 slid with only a floor in range), but at windows that split 014 and lost half the "
+                         "room; 0.1 kept 014/015 in one piece and didn't change 010/011")
     ap.add_argument("--reacquire-fitness", type=float, default=0.6,
                     help="after a bridge, the model match must cover this share of the usable depth to be trusted")
     ap.add_argument("--no-bridge", action="store_true",
@@ -98,7 +100,9 @@ def main():
     ap.add_argument("--bilateral", type=int, default=0, help="bilateral depth smoothing kernel size (0 = off)")
     ap.add_argument("--loop-closure", action="store_true",
                     help="after tracking, correct drift with a fragment pose graph and rebuild the model")
-    ap.add_argument("--fragment-size", type=int, default=30, help="frames per loop-closure fragment (smaller = more drift corrected, slower)")
+    ap.add_argument("--fragment-size", type=int, default=15,
+                    help="frames per loop-closure fragment (smaller = more drift corrected, slower; 15 straightened "
+                         "014 better than 30, loop closure takes ~2x longer)")
     args = ap.parse_args()
 
     o3d.utility.random.seed(0)  # segment joining uses RANSAC: same recording + settings -> same model
@@ -362,7 +366,7 @@ def main():
         pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, poses, K, depth_scale, args.depth_max,
                                                args.voxel, args.block_count, device)
     write_cloud(out / f"{name}_cloud.ply", pcd)
-    o3d.t.io.write_triangle_mesh(str(out / f"{name}_mesh.ply"), mesh)
+    write_mesh(out / f"{name}_mesh.ply", mesh)
     np.save(out / f"{name}_poses.npy", poses)
     np.save(out / f"{name}_track.npy", np.array(track_log, dtype=float))
     np.save(out / f"{name}_frames.npy", np.array(frame_ids))  # frame number of each pose in _poses / _lc_poses
@@ -390,7 +394,7 @@ def main():
         pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, lc_poses, K, depth_scale, args.depth_max,
                                                args.voxel, args.block_count, device)
         write_cloud(out / f"{name}_lc_cloud.ply", pcd)
-        o3d.t.io.write_triangle_mesh(str(out / f"{name}_lc_mesh.ply"), mesh)
+        write_mesh(out / f"{name}_lc_mesh.ply", mesh)
         np.save(out / f"{name}_lc_poses.npy", lc_poses)
         print(f"  Points: {pcd.point.positions.shape[0]:,}   Mesh triangles: {mesh.triangle.indices.shape[0]:,}")
         print(f"Wrote {out}/{name}_lc_cloud.ply, {name}_lc_mesh.ply, {name}_lc_poses.npy "
@@ -404,6 +408,15 @@ def write_cloud(path, pcd):
         pcd = pcd.clone()
         pcd.point.colors = (pcd.point.colors.clip(0, 1) * 255).to(o3c.uint8)
     o3d.t.io.write_point_cloud(str(path), pcd)
+
+
+def write_mesh(path, mesh):
+    """Write a mesh without the small disconnected specks that far, noisy depth leaves floating around the room."""
+    legacy = mesh.to_legacy()
+    pieces, _, area = legacy.cluster_connected_triangles()
+    legacy.remove_triangles_by_mask(np.asarray(area)[np.asarray(pieces)] < MIN_PIECE_M2)
+    legacy.remove_unreferenced_vertices()
+    o3d.io.write_triangle_mesh(str(path), legacy)
 
 
 def print_path_stats(poses):

@@ -4,12 +4,15 @@ Shared reading/writing of RGB-D recordings.
 
 Recording folder layout (Open3D's standard RGB-D dataset format):
     <name>/
-        color/000000.jpg ...   colour, aligned to the depth camera (JPEG)
-        depth/000000.png ...   16-bit depth in raw units (lossless PNG)
-        intrinsic.json         Open3D PinholeCameraIntrinsic (depth camera)
+        color/000000.jpg ...   colour (JPEG)
+        depth/000000.png ...   16-bit depth in raw units (lossless PNG), pixel-aligned with the colour
+        intrinsic.json         Open3D PinholeCameraIntrinsic of the camera both are in: meta["aligned_to"] "color"
+                               (from 2026-10-28: colour whole, depth aligned to it) or absent = the depth camera
+                               (older recordings: colour aligned to depth, blacked out where depth was missing)
         meta.json              depth_scale, fps, frame timestamps, dropped-frame count (+ "imu" info if recorded)
         imu.csv                optional: t_ms,sensor,x,y,z  (sensor g = gyro rad/s, a = accel m/s^2, in the IMU's
-                               axes; meta["imu"]["to_depth"] rotates them into the depth camera's; same clock as
+                               axes; meta["imu"]["to_camera"] (older: "to_depth") rotates them into the camera's
+                               above; same clock as
                                the frame timestamps)
 """
 import json
@@ -96,13 +99,14 @@ class FrameWriter:
 
 
 def read_imu(folder):
-    """Returns (gyro, accel, R_imu_to_depth) for a recording folder, or None if it has no IMU data. gyro/accel are
-    float arrays of rows (t_ms, x, y, z), in the depth camera's axes (x right, y down, z forward)."""
+    """Returns (gyro, accel, R_imu_to_camera) for a recording folder, or None if it has no IMU data. gyro/accel are
+    float arrays of rows (t_ms, x, y, z), in the recording camera's axes (x right, y down, z forward)."""
     folder = Path(folder)
     if not (folder / "imu.csv").exists():
         return None
     rows = np.genfromtxt(folder / "imu.csv", delimiter=",", skip_header=1, dtype=None, encoding=None)
-    R = np.array(json.load(open(folder / "meta.json")).get("imu", {}).get("to_depth", {}).get("rotation", np.eye(3)))
+    info = json.load(open(folder / "meta.json")).get("imu", {})
+    R = np.array(info.get("to_camera", info.get("to_depth", {})).get("rotation", np.eye(3)))
     out = []
     for k in ("g", "a"):
         a = np.array([(r[0], r[2], r[3], r[4]) for r in rows if r[1] == k], dtype=float).reshape(-1, 4)

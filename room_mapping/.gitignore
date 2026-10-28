@@ -11,3 +11,6 @@ samples/
 *.ply
 *.pcd
 d455_*.png
+
+# RTAB-Map runner build
+rtabmap/build/

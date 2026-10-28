@@ -8,6 +8,7 @@ Usage:
     python view.py 1              # recording 001's loop-closed mesh if there is one, else the plain mesh
     python view.py 1 --cloud      # the point cloud instead of the mesh
     python view.py 1 --plain      # the model without loop closure
+    python view.py 1 --filled     # with windows filled in by fill_openings.py (light blue)
     python view.py 1 --slice      # level the model, cut 0.5 m off the top (the ceiling), view from the top
     python view.py 1 --slice 1.0  # same, cut 1.0 m off the top
     python view.py 1 --measure    # Ctrl+click surfaces for distances (from the viewpoint and between clicks);
@@ -268,14 +269,15 @@ def view_measure(path, geom, tools=True):
     app.run()
 
 
-def find_model(arg, plain=False, cloud=False):
+def find_model(arg, plain=False, cloud=False, filled=False):
     """A model path, or the model for recording number `arg` in output/: the loop-closed one when it exists
-    (it's clearly better), else the plain reconstruction. plain=True forces the plain one."""
+    (it's clearly better), else the plain reconstruction. plain=True forces the plain one; filled=True the one with
+    glass filled in by fill_openings.py."""
     if Path(arg).exists():
         return Path(arg)
     if not arg.isdigit():
         sys.exit(f"'{arg}' is not a file or a recording number")
-    kind = "cloud" if cloud else "mesh"
+    kind = "cloud" if cloud else "filled_mesh" if filled else "mesh"
     for k in ([] if plain else [f"lc_{kind}"]) + [kind]:
         matches = sorted(OUTPUT.glob(f"{int(arg):03d}_????????_??????_{k}.ply"))
         if matches:
@@ -283,6 +285,8 @@ def find_model(arg, plain=False, cloud=False):
                 print(f"No loop-closed model for {int(arg):03d}; using the plain one. "
                       f"For a better one: .venv/bin/python reconstruct.py {arg} --loop-closure")
             return matches[0]
+    if filled:
+        sys.exit(f"No filled model for recording {int(arg):03d}. Make it with: .venv/bin/python fill_openings.py {arg}")
     sys.exit(f"No {kind} for recording {int(arg):03d} in output/. Build it with: "
              f".venv/bin/python reconstruct.py {arg} --loop-closure")
 
@@ -294,8 +298,9 @@ def main():
     ap.add_argument("--plain", action="store_true", help="the model without loop closure")
     ap.add_argument("--slice", type=float, nargs="?", const=0.5, metavar="METRES_OFF_TOP")
     ap.add_argument("--measure", action="store_true")
+    ap.add_argument("--filled", action="store_true", help="glass filled in (fill_openings.py), tinted light blue")
     args = ap.parse_args()
-    path = find_model(args.model, args.plain, args.cloud)
+    path = find_model(args.model, args.plain, args.cloud, args.filled)
     print(f"Opening {path}")
     if args.measure:
         view_measure(path, load_level(path, args.slice))

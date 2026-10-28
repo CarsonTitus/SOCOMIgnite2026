@@ -51,8 +51,8 @@ A realsense-viewer `.db3`/`.bag` can be converted with `convert.py <file>`.
 - Reconstruction runs on a laptop too (it falls back to the CPU without CUDA), but it is much slower, and
   `--loop-closure` can take several minutes. Alternatively, copy `recordings/NNN_…` back to the GPU PC and reconstruct there.
 
-**Windows and far space:** frames with under 30% of the image within 3 m (`--weak-usable`) aren't tracked against the
-model or built into it; the camera pose is carried across them ("bridged", up to 3 s) by colour + depth frame-to-frame
+**Windows and far space:** frames with under 10% of the image within 3 m (`--weak-usable`; was 30%, which split 014
+at its windows and lost half the room) aren't tracked against the model or built into it; the camera pose is carried across them ("bridged", up to 3 s) by colour + depth frame-to-frame
 odometry and, if the recording has IMU data, the gyro. If the model doesn't match when depth comes back, a new segment
 starts from the bridged pose and is registered against the earlier geometry (`place_segments`; with an IMU, joins that
 would tilt the room are rejected). `--depth-max` sets the model range (default 3 m; 5 m made 008 noisy and
@@ -86,6 +86,22 @@ for the rest of a scan (006 lost 834 of 1294 frames; 007, same room with blinds 
 
 A build can load other scans without rebuilding: `./RoomWalk -scan /path/to/scan.glb`.
 Scans stay outside the Unity project and the repo.
+
+**Recording format (2026-10-28):** both recorders now keep the colour image whole (848x480) and align depth to it
+(`meta.json` `"aligned_to": "color"`, `intrinsic.json` = colour camera). Before, colour was aligned to depth and blacked
+out wherever depth was missing (16-20% of each image), which broke visual tracking. Old recordings still work.
+
+**Glass (experimental):** `fill_openings.py N` finds wall planes in the loop-closed model, checks every empty 5 cm cell
+against the recording (far/no depth through it = glass, something close behind = opening, the wall itself = gap) and
+writes `<name>_lc_filled_mesh.ply` with the glass filled light blue; `view.py N --filled` opens it. It only works as
+well as the model: on bent models (014) the walls and the filled area change from build to build.
+
+**RTAB-Map (comparison only):** `rtabmap/` is a small C++ runner for RTAB-Map 0.23 from the ROS 2 Humble apt repo.
+Build: `source /opt/ros/humble/setup.bash && cmake -S rtabmap -B rtabmap/build && cmake --build rtabmap/build`.
+Run: `rtabmap/build/rtabmap_run <recording> <out.db> fx fy cx cy w h --Odom/ResetCountdown 1`, then
+`rtabmap-export --poses_camera` (stamps = frame / 30). It needs whole colour images (new format: on old recordings its
+odometry reset 265x on 013). On 015, built the same way from the same 217 keyframes, our camera path scored
+35/49/70% vs RTAB-Map's 27/37/56% (within 3/5/10 cm of 013), so the pipeline stays ours.
 
 ### Recording on the Pixel (Android app, in progress)
 `android/` is a small standalone app (not part of PSYOP-VISR) that does what `capture.py` does: live colour | depth
@@ -133,6 +149,8 @@ $ADB pull /sdcard/Android/data/com.socom.d455recorder/files/recordings/001_20261
 | `export_unity.py` | Model → levelled, decimated `.glb` for Unity |
 | `unity/*.cs` | Unity scripts: load a scan at runtime, first/third-person walking |
 | `android/` | Pixel recorder app (same recording format as `capture.py`) |
+| `fill_openings.py` | Experimental: fill glass (windows, glossy screens) in a finished model with tinted planes (`view.py N --filled`) |
+| `rtabmap/` | Runs RTAB-Map (ROS 2 Humble's `ros-humble-rtabmap`) on a recording, for comparison; see below |
 | `convert.py` | realsense-viewer `.db3`/`.bag` → compressed recording folder |
 | `rgbd_io.py` | Shared recording reader/writer |
 | `verify_d455_open3d.py` | Camera + Open3D sanity check |

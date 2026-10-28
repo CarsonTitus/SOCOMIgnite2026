@@ -41,7 +41,7 @@ import kotlin.concurrent.thread
 
 /**
  * D455 recorder: live colour | depth preview, tap REC to start/stop. Same settings and output as
- * room_mapping/capture.py (848x480 depth, 640x480 colour aligned to depth, 30 fps, + the D455's gyro/accel), written to
+ * room_mapping/capture.py (848x480 colour, 848x480 depth aligned to it, 30 fps, + the D455's gyro/accel), written to
  * /sdcard/Android/data/com.socom.d455recorder/files/recordings/NNN_YYYYMMDD_HHMMSS/.
  */
 class MainActivity : AppCompatActivity() {
@@ -158,7 +158,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun cameraLoop() {
         val pipe = Pipeline()
-        val align = Align(StreamType.DEPTH)
+        // Depth is aligned to colour, not the other way round: colour aligned to depth is blacked out wherever depth
+        // is missing (16-20% of each image, up to 47% at windows), which breaks visual tracking (RTAB-Map)
+        val align = Align(StreamType.COLOR)
         var writer: FrameWriter? = null
         var recStart = 0L
         var device: Device? = null  // kept open while the IMU runs: closing a Device releases its sensors
@@ -177,7 +179,7 @@ class MainActivity : AppCompatActivity() {
                 Log.w(TAG, "IMU: could not start, recording without it", e)
             }
             imuText = imuInfo?.let { "IMU %d/%d Hz".format(it.getInt("gyro_hz"), it.getInt("accel_hz")) } ?: "NO IMU"
-            val intr = depthIntrinsics(pipe)
+            val intr = colorIntrinsics(pipe)
             repeat(WARMUP_FRAMES) { pipe.waitForFrames(5000).close() }  // let auto-exposure settle
             runOnUiThread { recButton.isEnabled = true }
 
@@ -261,7 +263,7 @@ class MainActivity : AppCompatActivity() {
         val accel = profiles.filter { it.type == StreamType.ACCEL }.minByOrNull { it.frameRate } ?: return null
         val ext = pipe.activeStreams.let { active ->
             try {
-                gyro.getExtrinsicTo(active.first { it.type == StreamType.DEPTH })
+                gyro.getExtrinsicTo(active.first { it.type == StreamType.COLOR })
             } finally {
                 active.forEach { it.close() }
             }
@@ -271,7 +273,7 @@ class MainActivity : AppCompatActivity() {
         val rot = f("mRotation")
         val info = JSONObject()
             .put("gyro_hz", gyro.frameRate).put("accel_hz", accel.frameRate)
-            .put("to_depth", JSONObject()
+            .put("to_camera", JSONObject()
                 .put("rotation", JSONArray((0 until 3).map { r -> JSONArray((0 until 3).map { c -> rot[c * 3 + r].toDouble() }) }))
                 .put("translation", JSONArray(f("mTranslation").map { it.toDouble() })))
         motion.openSensor(listOf(gyro, accel))
@@ -285,11 +287,12 @@ class MainActivity : AppCompatActivity() {
         return motion to info
     }
 
-    private fun depthIntrinsics(pipe: Pipeline): Intrinsics {
+    /** The colour camera's intrinsics: the recording's depth is aligned to it. */
+    private fun colorIntrinsics(pipe: Pipeline): Intrinsics {
         val profiles = pipe.activeStreams
         try {
-            val depth = profiles.first { it.type == StreamType.DEPTH }
-            val i: Intrinsic = depth.`as`<VideoStreamProfile>(Extension.VIDEO_PROFILE).intrinsic
+            val color = profiles.first { it.type == StreamType.COLOR }
+            val i: Intrinsic = color.`as`<VideoStreamProfile>(Extension.VIDEO_PROFILE).intrinsic
             // The Java wrapper has no getters for focal length / principal point
             fun f(name: String) = Intrinsic::class.java.getDeclaredField(name).apply { isAccessible = true }.getFloat(i)
             return Intrinsics(i.width, i.height, f("mFx"), f("mFy"), f("mPpx"), f("mPpy"))
@@ -345,7 +348,7 @@ class MainActivity : AppCompatActivity() {
         const val TAG = "D455Recorder"
         const val DEPTH_W = 848   // D455's best-quality depth mode
         const val DEPTH_H = 480
-        const val COLOR_W = 640   // reconstruction works at depth resolution, so more colour is wasted
+        const val COLOR_W = 848   // same size as depth, which is aligned to it
         const val COLOR_H = 480
         const val FPS = 30
         const val WARMUP_FRAMES = 30

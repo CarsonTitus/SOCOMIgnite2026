@@ -18,7 +18,7 @@ import java.util.zip.CRC32
 import java.util.zip.Deflater
 import java.util.zip.DeflaterOutputStream
 
-/** Pinhole intrinsics of the depth stream (colour is aligned to it). */
+/** Pinhole intrinsics of the colour stream (depth is aligned to it). */
 private class ImuSample(val t: Double, val sensor: Char, val x: Float, val y: Float, val z: Float)
 
 data class Intrinsics(val width: Int, val height: Int, val fx: Float, val fy: Float, val ppx: Float, val ppy: Float)
@@ -26,9 +26,9 @@ data class Intrinsics(val width: Int, val height: Int, val fx: Float, val fy: Fl
 /**
  * Writes aligned depth/colour frames to a recording folder on background threads, in the same layout as
  * room_mapping/rgbd_io.py (Open3D's RGB-D dataset format), so reconstruct.py reads phone recordings unchanged:
- *     color/000000.jpg   colour aligned to depth (JPEG 90)
- *     depth/000000.png   16-bit depth in raw units (lossless PNG)
- *     intrinsic.json     Open3D PinholeCameraIntrinsic (depth camera)
+ *     color/000000.jpg   colour (JPEG 90)
+ *     depth/000000.png   16-bit depth in raw units (lossless PNG), aligned to the colour
+ *     intrinsic.json     Open3D PinholeCameraIntrinsic (colour camera; meta.json "aligned_to": "color")
  *     meta.json          depth_scale, fps, frame timestamps, dropped-frame count (+ "imu" info if recorded)
  *     imu.csv            optional: t_ms,sensor,x,y,z (g = gyro rad/s, a = accel m/s^2, IMU axes, frame clock)
  */
@@ -51,7 +51,7 @@ class FrameWriter(val folder: File, private val intr: Intrinsics, depthScale: Do
         File(folder, "intrinsic.json").writeText(
             JSONObject().put("width", intr.width).put("height", intr.height).put("intrinsic_matrix", k).toString())
         meta.put("recorded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date()))
-            .put("depth_scale", depthScale).put("fps", fps).put("device", "android")
+            .put("depth_scale", depthScale).put("fps", fps).put("device", "android").put("aligned_to", "color")
     }
 
     /** depth: little-endian uint16 (Z16), color: packed RGB8, both intrinsics-sized. False if the queue was full. */
