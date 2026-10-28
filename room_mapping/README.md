@@ -149,6 +149,7 @@ $ADB pull /sdcard/Android/data/com.socom.d455recorder/files/recordings/001_20261
 | `export_unity.py` | Model → levelled, decimated `.glb` for Unity |
 | `unity/*.cs` | Unity scripts: load a scan at runtime, first/third-person walking |
 | `android/` | Pixel recorder app (same recording format as `capture.py`) |
+| `floor_level.py` | After loop closure: removes height/tilt drift using the floor (`reconstruct.py --no-floor-level` skips it) |
 | `fill_openings.py` | Experimental: fill glass (windows, glossy screens) in a finished model with tinted planes (`view.py N --filled`) |
 | `rtabmap/` | Runs RTAB-Map (ROS 2 Humble's `ros-humble-rtabmap`) on a recording, for comparison; see below |
 | `convert.py` | realsense-viewer `.db3`/`.bag` → compressed recording folder |

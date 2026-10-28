@@ -14,7 +14,8 @@ Usage:
 
 Writes <out>/<name>_cloud.ply, <name>_mesh.ply and <name>_poses.npy (camera trajectory), plus _frames.npy (frame number
 of each pose), _track.npy (per-frame tracking state) and, with an IMU, _up.npy (measured up direction).
-With --loop-closure, also writes <name>_lc_cloud.ply, <name>_lc_mesh.ply and <name>_lc_poses.npy.
+With --loop-closure, also writes <name>_lc_cloud.ply, <name>_lc_mesh.ply and <name>_lc_poses.npy, after levelling the
+path to the floor (floor_level.py; --no-floor-level to skip).
 """
 import argparse
 import json
@@ -26,6 +27,7 @@ import numpy as np
 import open3d as o3d
 import open3d.core as o3c
 
+import floor_level
 import loop_closure
 from rgbd_io import open_recording, read_imu, resolve_recording
 
@@ -100,6 +102,8 @@ def main():
     ap.add_argument("--bilateral", type=int, default=0, help="bilateral depth smoothing kernel size (0 = off)")
     ap.add_argument("--loop-closure", action="store_true",
                     help="after tracking, correct drift with a fragment pose graph and rebuild the model")
+    ap.add_argument("--no-floor-level", action="store_true",
+                    help="with --loop-closure, don't correct height/tilt drift using the floor (floor_level.py)")
     ap.add_argument("--fragment-size", type=int, default=15,
                     help="frames per loop-closure fragment (smaller = more drift corrected, slower; 15 straightened "
                          "014 better than 30, loop closure takes ~2x longer)")
@@ -390,6 +394,13 @@ def main():
             b, a = st["tilt_before_deg"], st["tilt_after_deg"]
             print(f"  gravity: tilt off the start's 'up' per fragment, median/max {np.median(b):.2f}/{b.max():.2f} deg "
                   f"before -> {np.median(a):.2f}/{a.max():.2f} deg after")
+        if not args.no_floor_level:
+            frames_again, *_ = open_recording(args.recording)
+            lc_poses, fl = floor_level.level_to_floor(frames_again, frame_ids, lc_poses, K, depth_scale, args.depth_min,
+                                                      args.track_depth_max)
+            print(f"  floor levelling: {fl['skipped']}" if "skipped" in fl else
+                  f"  floor levelling: floor seen in {fl['floor_frames']} sampled frames; removed {100 * fl['height_range_m']:.0f} cm "
+                  f"of height drift and up to {fl['tilt_max_deg']:.1f} deg of tilt (median {fl['tilt_median_deg']:.1f})")
         print_path_stats(lc_poses)
         pcd, mesh = loop_closure.integrate_all(args.recording, frame_ids, lc_poses, K, depth_scale, args.depth_max,
                                                args.voxel, args.block_count, device)

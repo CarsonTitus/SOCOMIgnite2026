@@ -49,6 +49,8 @@ A wearable system for mapping indoor rooms in 3D after a raid, using depth-camer
 - `android/`: Pixel recorder app (Kotlin, Gradle); same recording folder format as `capture.py`. Build/install steps in README.
 - `fill_openings.py` (experimental): fills glass/glossy screens in a finished model with light-blue planes →
   `<name>_lc_filled_mesh.ply`, opened by `view.py N --filled`. Unreliable on bent models (014: 2-11 m² between builds)
+- `floor_level.py`: after loop closure, levels the camera path to the floor (height + tilt drift over time);
+  `reconstruct.py --no-floor-level` skips it. Skips itself when the floor is in <20% of sampled frames
 - `rtabmap/`: C++ runner for RTAB-Map (ROS 2 Humble `ros-humble-rtabmap`, /opt/ros/humble), comparison only; README
 - `rgbd_io.py`: shared recording reader/writer (folder, .db3, .bag). Folder layout is Open3D's standard RGB-D dataset format.
 
@@ -181,8 +183,16 @@ memory don't follow between machines, so this section is the handoff.
    - **RTAB-Map (2026-10-28):** installed from the ROS 2 Humble apt repo, which upgraded librealsense to **2.59.1**
      (`.venv` pyrealsense2 is still 2.58.4: upgrade before live capture on the tower). On 015, same 217 keyframes
      built our way: our poses 35/49/70%, RTAB-Map's 27/37/56% (vs 013, itself our pipeline's). Staying with ours.
-   - **Next:** multi-room scan through a doorway with the new app (user's plan, after approving the window result);
-     IMU calibration; then revisit gravity edges.
+   - **Floor levelling (2026-10-28):** the stacked floors were steady height drift over time, not depth error: on
+     015 the floor seen by each frame landed 22 cm lower at the end than the start (correlation with time -0.93, with
+     viewing distance -0.05), in both our pipeline and RTAB-Map. `floor_level.py` measures the floor plane per frame
+     and removes smoothed height/tilt drift. Floor spread (5-95%): 015 2-23 -> 1.4-4.6 cm, 011 6-24 -> 0.7-2.9,
+     010 2.5-10.5 -> -0.3-4.5; scores vs levelled 013 up 3-5 points at 3 cm. 014 got worse (floor in only 12% of
+     frames: corrections interpolated across the window passes), hence the 20% gate. RTAB-Map: user judged its
+     models worse than ours, dropped. IMU calibration (Intel rs-imu-calibration) started, stopped by the user before
+     writing; nothing written to the camera. Scans + models copied to the partner's SSD (ADATA, README.txt there).
+   - **Next:** multi-room scan through a doorway with the new app (user's plan); floor levelling across rooms assumes
+     one floor level (no stairs).
    - Live colour + depth preview, start/stop; record into the same folder layout as `capture.py` / `rgbd_io.py`
      (depth 16-bit PNG, colour JPEG, `intrinsic.json`, `meta.json` with depth_scale, fps, timestamps, dropped)
      at 848x480 depth / 640x480 colour @ 30 fps, so `reconstruct.py --loop-closure`, `view.py --measure` and
